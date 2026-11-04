@@ -41,6 +41,15 @@
 
 (def mat-thickness 0.03)
 
+;; the opponent's hand: backs fanned at the far edge of the mat, smaller
+(def opp-hand-z 4.5)       ; distance of the fan's middle (lying flat) from the table centre
+(def opp-hand-tilt 2.0)    ; radians turned up about the far edge: past upright, so the
+                           ; cards lean back towards the opponent holding them
+(def opp-hand-lift 0.12)   ; held a little above the table
+(def opp-hand-scale 0.7)
+(def opp-hand-spacing 0.26)
+(def opp-hand-angle 0.1)
+
 ;; cards are thin rounded slabs (real cards: 63 x 88 mm, ~3 mm corner radius;
 ;; the thickness is exaggerated a little so the edge is visible)
 (def card-radius 0.032)
@@ -128,6 +137,21 @@
         (.addColorStop g 1 "rgba(0,0,0,0)")
         (set! (.-fillStyle ctx) g)
         (.fillRect ctx 0 0 128 160)))))
+
+(defn- hand-shadow-texture
+  "A soft, light card-shaped shadow for cards in the hand: a blurred rounded
+  rectangle (drawn off-canvas, only its blur lands on the canvas)."
+  []
+  (canvas-texture
+    "hand-shadow" 160 200
+    (fn [^js ctx]
+      (set! (.-shadowColor ctx) "rgba(0,0,0,0.38)")
+      (set! (.-shadowBlur ctx) 26)
+      (set! (.-shadowOffsetX ctx) 1000)
+      (set! (.-fillStyle ctx) "#000")
+      (.beginPath ctx)
+      (.roundRect ctx (- 28 1000) 28 104 144 8)
+      (.fill ctx))))
 
 (defn- badge-texture
   "Counters (top left) and strength (bottom right) drawn on a transparent card-sized overlay."
@@ -274,6 +298,44 @@
                          (assoc (card-entry card :hand [0 0 0] 0)
                                 :hand true :staged true :stage-index i))
                        staged))))
+
+(defn- opponent-hand
+  "The opponent's hand as card backs fanned at the far edge of the mat (their
+  side is -z), plus the count for the mat beside the fan."
+  [me]
+  (let [gs @game-state
+        opp (if (= me :corp) :runner :corp)
+        n (or (get-in gs [opp :hand-count]) (count (get-in gs [opp :hand])) 0)
+        side (if (= opp :corp) "Corp" "Runner")
+        url (board/facedown-card-url side)
+        mid (/ (dec n) 2)
+        r (/ opp-hand-spacing opp-hand-angle)
+        cards (vec (for [i (range n)
+                         :let [off (- i mid)
+                               a (* off opp-hand-angle)]]
+                     {:id (str "opp-hand-" i)
+                      :side side
+                      :url url
+                      :back? true
+                      :opp-hand true
+                      ;; held up, backs towards us (see ice-pose-target!); the
+                      ;; fan is an upright arch like my own hand: each card turns
+                      ;; within its own plane and the outer ones sit lower
+                      :ice-pose :opp-hand
+                      :fan-angle (- a)
+                      :fan-drop (* r (- 1 (js/Math.cos a)))
+                      ;; later cards a hair closer to us, so they overlap the earlier ones
+                      :pos [(* (- off) opp-hand-spacing) 0 (+ (- opp-hand-z) (* i 0.004))]
+                      :rot js/Math.PI}))
+        half (+ (* opp-hand-spacing (max 0 mid)) (* opp-hand-scale card-w 0.5))]
+    {:cards cards
+     ;; beside the fan (on the opponent's right), just inside the edge, facing them
+     :count (when (pos? n)
+              {:id (str (name opp) "-hand-count")
+               :text (str n)
+               :glyph "cards"
+               :pos [(- (+ half 0.45)) 0.001 (- (- opp-hand-z 0.15))]
+               :rot js/Math.PI})}))
 
 (defn- layout
   "Returns {:cards [...] :labels [...] :run-marker ...} for the current game state."
@@ -636,9 +698,9 @@
         ^js hit (card-plane card-face-geometry @hit-material)
         ;; in the hand: a small shadow cast onto the card behind, so overlapping
         ;; cards read as separate
-        ^js drop (plane (* 1.25 card-w) (* 1.15 card-h)
-                        (THREE/MeshBasicMaterial. #js {:map (shadow-texture) :transparent true
-                                                       :opacity 0.95 :depthWrite false}))
+        ^js drop (plane (* 1.54 card-w) (* 1.39 card-h)
+                        (THREE/MeshBasicMaterial. #js {:map (hand-shadow-texture) :transparent true
+                                                       :depthWrite false}))
         ;; soft shadow on the table; it stays down there when the card lifts or floats
         ^js shadow (plane (* 1.2 card-w) (* 1.2 card-h)
                           (THREE/MeshBasicMaterial. #js {:map (shadow-texture) :transparent true
@@ -652,7 +714,7 @@
     (.add pose tilt)
     (.add pose hit)
     ;; just behind the card, offset left and down
-    (.set (.-position drop) -0.07 -0.001 0.04)
+    (.set (.-position drop) -0.05 -0.001 0.03)
     (set! (.-visible drop) false)
     (.add pose drop)
     (.add group pose)
@@ -700,6 +762,8 @@
       (set! (.-seed ud) (* 100 (js/Math.random))))
     (set! (.-pushDir ud) (or push-dir 0))
     (set! (.-handIndex ud) (or hand-index 0))
+    (set! (.-fanAngle ud) (or (:fan-angle entry) 0))
+    (set! (.-fanDrop ud) (or (:fan-drop entry) 0))
     (set! (.. ud -drop -visible) (boolean hand-index))
     (set! (.-handCount ud) (or hand-count 1))
     (set! (.-icePose ud) (some-> ice-pose name))
@@ -735,6 +799,8 @@
           (set-thickness! ud (max card-thickness (* 0.003 (min count 40)))))
       (do (set! (.-visible group) true)
           (set-thickness! ud card-thickness)))
+    (when (:opp-hand entry)
+      (.set (.-scale group) opp-hand-scale opp-hand-scale opp-hand-scale))
     (set! (.-target ud) #js [x y z rot])))
 
 (defn- spawn-position
@@ -955,8 +1021,23 @@
         x0 (- 128 (/ (+ tw 10 gw) 2))]
     (set! (.-textAlign ctx) "left")
     (.fillText ctx text x0 58)
-    (set! (.-font ctx) "52px anr-icon")
-    (.fillText ctx glyph (+ x0 tw 10) 58)))
+    (if (= glyph "cards")
+      ;; no font glyph for cards: two small overlapping card shapes
+      (let [gx (+ x0 tw 14)]
+        (set! (.-strokeStyle ctx) "#ececec")
+        (set! (.-lineWidth ctx) 4)
+        (doseq [[dx dy a] [[0 0 -0.18] [16 -2 0.12]]]
+          (.save ctx)
+          (.translate ctx (+ gx dx 14) (+ 58 dy))
+          (.rotate ctx a)
+          (.beginPath ctx)
+          (.roundRect ctx -13 -19 26 38 4)
+          (set! (.-fillStyle ctx) "rgba(40,40,40,0.9)")
+          (.fill ctx)
+          (.stroke ctx)
+          (.restore ctx)))
+      (do (set! (.-font ctx) "52px anr-icon")
+          (.fillText ctx glyph (+ x0 tw 10) 58)))))
 
 (defn- count-texture
   "A count with the credit or click icon, as a small dark pill lying on the mat."
@@ -1171,8 +1252,10 @@
           (set! (.. shadow -position -y) (+ (- y) 0.002)))))))
 
 (defn- sync-scene! [{:keys [view] :as ctx} me]
-  (let [{:keys [cards labels run-marker run-lane]} (layout me)
-        tokens (token-layout me cards)
+  (let [{table-cards :cards :keys [labels run-marker run-lane]} (layout me)
+        tokens (token-layout me table-cards)
+        {opp-cards :cards opp-count :count} (opponent-hand me)
+        cards (into table-cards opp-cards)
         ;; chips count for the camera's framing too
         bounds (some-> (card-bounds (concat cards (map #(update % :pos (fn [[x _ z]] [x 0 z])) tokens)))
                        ;; leave room at the bottom (my side, +z) for the hand
@@ -1182,7 +1265,7 @@
     (sync-run-marker! ctx run-marker)
     (sync-run-lane! ctx run-lane)
     (sync-tokens! ctx tokens)
-    (sync-token-counts! ctx (token-counts me cards))
+    (sync-token-counts! ctx (cond-> (token-counts me table-cards) opp-count (conj opp-count)))
     (when (not= bounds (:bounds @view))
       (swap! view assoc :bounds bounds)
       (fit-camera! ctx))))
@@ -1202,11 +1285,14 @@
 (def ^:private pose-v (THREE/Vector3.))
 (def ^:private pose-m (THREE/Matrix4.))
 
+(def ^:private fan-q (THREE/Quaternion.))
+(def ^:private fan-v (THREE/Vector3.))
+
 (defn- ice-pose-target!
   "Sets pose-q / pose-v to where the ice's pose group should be. All in the ice
   group's frame, which is turned a quarter: local +x points to world -z, local
   +z to world +x. `dir` is +1 when the runner sits on the world +z side."
-  [kind dir s]
+  [kind dir s ^js ud]
   (let [half (/ card-w 2)]
     (case kind
       ;; rotate about the card's long axis by dir*a: the corp-side edge lifts,
@@ -1236,6 +1322,19 @@
                   (+ (* (- dir) 0.12) (* dir hh (js/Math.sin ice-encounter-lean)))
                   (+ (* hh (js/Math.cos ice-encounter-lean)) 0.01 (* 0.012 (js/Math.sin (* s 2.2))))
                   0)))
+      ;; the opponent's hand, held up behind the mat: the card turns about its
+      ;; bottom edge (local z = +h/2; the group is turned so its top points
+      ;; at us) until its face points at the opponent and its back at us
+      "opp-hand"
+      (let [a opp-hand-tilt
+            c (/ card-h 2)]
+        (.setFromAxisAngle pose-q (THREE/Vector3. 1 0 0) a)
+        (.set pose-v 0 (+ (* c (js/Math.sin a)) opp-hand-lift) (* c (- 1 (js/Math.cos a))))
+        ;; the arch: turn within the card's plane (about its normal, before it
+        ;; stands up) and slide down along it (towards its bottom edge, local +z)
+        (.multiply pose-q (.setFromAxisAngle fan-q y-axis (or (.-fanAngle ud) 0)))
+        (.add pose-v (-> (.set fan-v 0 0 (or (.-fanDrop ud) 0))
+                         (.applyAxisAngle (THREE/Vector3. 1 0 0) a))))
       (do (.identity pose-q)
           (.set pose-v 0 0 0)))))
 
@@ -1250,12 +1349,17 @@
         ^js p (.-position pose)]
     ;; nothing to do for the many cards lying flat
     (when (or kind (not= 1 (.-w q)) (not (zero? (.lengthSq p))))
-      (ice-pose-target! kind (or (.-poseDir ud) 1) (+ now (or (.-seed ud) 0)))
-      (if (and (nil? kind) (< (.angleTo q pose-q) 0.001) (< (.distanceTo p pose-v) 0.0005))
-        (do (.identity q) (.set p 0 0 0))
+      (ice-pose-target! kind (or (.-poseDir ud) 1) (+ now (or (.-seed ud) 0)) ud)
+      (cond
+        (and (nil? kind) (< (.angleTo q pose-q) 0.001) (< (.distanceTo p pose-v) 0.0005))
+        (do (.identity q) (.set p 0 0 0) (vreset! moving true))
+        ;; a pose that holds still (the opponent's hand) stops costing frames
+        (and (< (.angleTo q pose-q) 0.0001) (< (.distanceTo p pose-v) 0.0001))
+        nil
+        :else
         (do (.slerp q pose-q ice-pose-speed)
-            (.lerp p pose-v ice-pose-speed)))
-      (vreset! moving true))))
+            (.lerp p pose-v ice-pose-speed)
+            (vreset! moving true))))))
 
 (def ^:private inspect-v (THREE/Vector3.))
 (def ^:private inspect-q (THREE/Quaternion.))
