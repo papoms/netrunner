@@ -882,19 +882,41 @@
       [(- (apply min xs) pad-x) (+ (apply max xs) pad-x)
        (- (apply min zs) pad-z) (+ (apply max zs) pad-z)])))
 
+(defn- free-area
+  "[left width] of the unobstructed area within the canvas: the central pane.
+  With :board-3d-full-width the canvas spans the whole board behind the side
+  panels while the (empty) central pane keeps its place in the layout; otherwise
+  the canvas and the central pane coincide."
+  [^js container w]
+  (if-let [^js pane (.closest container ".centralpane")]
+    (let [cr (.getBoundingClientRect container)
+          pr (.getBoundingClientRect pane)
+          left (max 0 (js/Math.round (- (.-left pr) (.-left cr))))
+          width (max 1 (min (js/Math.round (.-width pr)) (- w left)))]
+      [left width])
+    [0 w]))
+
 (defn- resize! [{:keys [^js renderer ^js camera ^js scene view] :as ctx} ^js container]
   (let [w (max 1 (.-clientWidth container))
         h (max 1 (.-clientHeight container))
-        ^js size (.getSize renderer (THREE/Vector2.))]
-    (when (or (not= w (.-x size)) (not= h (.-y size)))
+        [free-left free-w] (free-area container w)
+        layout [w h free-left free-w]]
+    (when (not= layout (:layout @view))
+      (swap! view assoc :layout layout)
       ;; only the drawing buffer: the canvas' CSS size is 100% of its holder.
       ;; Setting a pixel width here (clientWidth is rounded) can overflow the
       ;; scrollable central pane by a fraction of a pixel, which toggles its
       ;; scrollbars and resizes the canvas again in a loop.
       (.setSize renderer w h false)
-      (set! (.-aspect camera) (/ w h))
+      ;; centre the projection on the free area: render the canvas as a window
+      ;; into a wider virtual view whose middle is the free area's middle
+      (let [cx (+ free-left (/ free-w 2))
+            vw (* 2 (max cx (- w cx)))]
+        (set! (.-aspect camera) (/ vw h))
+        (.setViewOffset camera vw h (- (/ vw 2) cx) 0 w h))
       (.updateProjectionMatrix camera)
-      (swap! view assoc :aspect (/ w h))
+      ;; the camera frames the cards to fit the free area
+      (swap! view assoc :aspect (/ free-w h))
       (fit-camera! ctx)
       ;; setSize clears the canvas: draw right away (ResizeObserver callbacks run
       ;; before the browser paints) instead of waiting for the next animation frame
@@ -1011,6 +1033,8 @@
              (resize! c el)
              (reset! resize-observer (js/ResizeObserver. #(resize! c el)))
              (.observe @resize-observer el)
+             ;; the free area (central pane) can change size on its own
+             (some->> (.closest el ".centralpane") (.observe @resize-observer))
              (.addEventListener canvas "pointerdown" on-pointer-down)
              (.addEventListener canvas "pointerup" on-pointer-up)
              (.addEventListener canvas "pointermove" on-pointer-move)

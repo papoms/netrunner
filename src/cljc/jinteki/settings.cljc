@@ -214,6 +214,11 @@
     :sync? false  ; device-specific: depends on the device's WebGL support
     :validate-fn boolean?
     :doc "Experimental: render the game board with three.js"}
+   {:key :board-3d-full-width
+    :default false
+    :sync? false  ; device-specific, like :board-3d
+    :validate-fn boolean?
+    :doc "The 3D board spans the whole width; the side panels float above it"}
    {:key :board-3d-playmat
     :default ""
     :sync? false  ; device-specific, like :board-3d

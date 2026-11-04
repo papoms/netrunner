@@ -1609,6 +1609,8 @@ settings_block = Block user
 
 settings_board-3d = 3D game board (three.js, experimental)
 
+settings_board-3d-full-width = 3D board fills the whole width (side panels float above it)
+
 settings_board-3d-playmat = Playmat image for the 3D board (URL, Corp half on the left, Runner half on the right; empty for the plain table)
 
 settings_blocked = Blocked users

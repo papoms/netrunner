@@ -39,3 +39,26 @@
         background: rgba(0, 0, 0, 0.6)
         border-radius: 4px
         text-align: center
+
+// Setting :board-3d-full-width: the 3D board spans the whole game board and the
+// side panels float above it. The (now empty) central pane keeps its place in
+// the layout: nr.gameboard.board3d centres the cards on it, so they stay in the
+// unobstructed area.
+.gameboard.board3d-full
+    position: relative
+
+    .centralpane
+        position: static
+
+        .board3d
+            position: absolute
+            top: 0
+            left: 0
+            right: 0
+            bottom: 0
+            z-index: 0
+
+    .leftpane, .right-pane
+        position: relative
+        z-index: 1
+        background: rgba(8, 10, 14, 0.55)

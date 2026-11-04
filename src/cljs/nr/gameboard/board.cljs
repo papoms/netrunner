@@ -2422,7 +2422,8 @@
         labeled-cards (r/cursor app-state [:options :labeled-cards])
         card-unplayable-fade-out (r/cursor app-state [:options :card-unplayable-fade-out])
         card-hover-movement (r/cursor app-state [:options :card-hover-movement])
-        board-3d (r/cursor app-state [:options :board-3d])]
+        board-3d (r/cursor app-state [:options :board-3d])
+        board-3d-full-width (r/cursor app-state [:options :board-3d-full-width])]
 
     (go (while true
           (let [zoom (<! zoom-channel)]
@@ -2514,6 +2515,7 @@
                              (card-colors-class @card-colors)
                              (when (and (not= @side :spectator) @card-unplayable-fade-out) :card-unplayable-fade-out)
                              (when (and (not= @side :spectator) @card-hover-movement) :card-hover-movement)
+                             (when (and @board-3d @board-3d-full-width) :board3d-full)
                              (when @labeled-unrezzed-cards :show-unrezzed-card-labels)
                              (when @labeled-cards :show-card-labels)]
                      :style (card-colors-custom-style {:card-colors @card-colors
