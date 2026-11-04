@@ -758,6 +758,9 @@
 (def chip-spacing 0.43)
 (def chip-stack-max 10)  ; taller stacks are split
 (def chip-z 0.45)        ; distance from the middle line
+(def chip-hover-gap 0.03) ; a hovered stack fans out: this much air between chips
+(def chip-hover-lift 0.03)
+(def count-offset 0.4)    ; the count on the mat, in front of the chips (towards the player)
 
 (def chip-kinds
   ;; glyphs of the anr-icon font (see fonts.styl), how many on the top, and
@@ -778,9 +781,9 @@
     (-> (.load js/document.fonts "100px anr-icon")
         (.then (fn [_]
                  (reset! icon-font-ready true)
-                 (doseq [k (keys chip-kinds)]
-                   (when-let [^js t (.get texture-cache (str "chip-top-" (name k)))]
-                     (when-let [redraw (.. t -userData -redraw)] (redraw))
+                 (doseq [^js t (es6-iterator-seq (.values texture-cache))]
+                   (when-let [redraw (.. t -userData -redraw)]
+                     (redraw)
                      (set! (.-needsUpdate t) true)))
                  (reset! redraw-requested true))))))
 
@@ -827,6 +830,33 @@
   (let [k (str "chip-top-" (name kind))
         ^js t (canvas-texture k 512 512 #(draw-chip-top kind %))]
     (set! (.. t -userData -redraw) #(draw-chip-top kind (.getContext (.-image t) "2d")))
+    t))
+
+(defn- draw-count [text glyph ^js ctx]
+  (.setTransform ctx 1 0 0 1 0 0)
+  (.clearRect ctx 0 0 256 112)
+  (set! (.-fillStyle ctx) "rgba(0,0,0,0.5)")
+  (.beginPath ctx)
+  (.roundRect ctx 8 12 240 88 44)
+  (.fill ctx)
+  (set! (.-fillStyle ctx) "#ececec")
+  (set! (.-textBaseline ctx) "middle")
+  (set! (.-font ctx) "bold 64px sans-serif")
+  (let [tw (.-width (.measureText ctx text))
+        gw 52
+        x0 (- 128 (/ (+ tw 10 gw) 2))]
+    (set! (.-textAlign ctx) "left")
+    (.fillText ctx text x0 58)
+    (set! (.-font ctx) "52px anr-icon")
+    (.fillText ctx glyph (+ x0 tw 10) 58)))
+
+(defn- count-texture
+  "A count with the credit or click icon, as a small dark pill lying on the mat."
+  [text glyph]
+  (ensure-icon-font!)
+  (let [k (str "count:" text glyph)
+        ^js t (canvas-texture k 256 112 #(draw-count text glyph %))]
+    (set! (.. t -userData -redraw) #(draw-count text glyph (.getContext (.-image t) "2d")))
     t))
 
 (defn- chip-side-texture [kind]
@@ -903,6 +933,7 @@
                     (for [[i [kind cnt part]] (map-indexed vector stacks)
                           level (range cnt)]
                       {:id (str (name side) "-" (name kind) "-" part "-" level)
+                       :stack (str (name side) "-" (name kind) "-" part)
                        :kind kind
                        :level level
                        :pos [(* left (+ extent (* (- n 1 i) chip-spacing)))
@@ -910,18 +941,67 @@
                     ;; unspent clicks innermost, spent ones flipped further out
                     (for [i (range click-chips)]
                       {:id (str (name side) "-click-" i)
+                       :stack (str (name side) "-click-" i)
                        :kind :click
                        :level 0
                        :flipped (>= i clicks)
                        :pos [(* (- left) (+ extent (* i chip-spacing))) 0 z]}))]
         entry))))
 
+(defn- token-counts
+  "The counts on the mat in front of each player's credits and clicks."
+  [me cards]
+  (let [gs @game-state
+        chips (token-layout me cards)]
+    (vec
+      (for [side [:corp :runner]
+            [kind glyph text] [[:credit "\ue600" (str (max 0 (or (get-in gs [side :credit]) 0)))]
+                               [:click "\ue611" (str (max 0 (or (get-in gs [side :click]) 0)))]]
+            :let [prefix (str (name side) "-" (name kind))
+                  xs (keep #(when (str/starts-with? (:id %) prefix) (get-in % [:pos 0])) chips)
+                  f (if (= side me) 1 -1)]
+            :when (seq xs)]
+        {:id (str prefix "-count")
+         :text text
+         :glyph glyph
+         :pos [(/ (+ (apply min xs) (apply max xs)) 2) 0.001 (* f (+ chip-z count-offset))]
+         ;; the opponent's counts face them
+         :rot (if (= f 1) 0 js/Math.PI)}))))
+
+(defn- sync-token-counts! [{:keys [^js scene ^js token-counts]} entries]
+  (let [seen (js/Set.)]
+    (doseq [{:keys [id text glyph pos rot]} entries]
+      (.add seen id)
+      (let [^js m (or (.get token-counts id)
+                      (let [^js m (plane 0.56 0.245 (THREE/MeshBasicMaterial. #js {:transparent true :depthWrite false}))]
+                        (.add scene m)
+                        (.set token-counts id m)
+                        m))
+            [x y z] pos]
+        (set! (.. m -material -map) (count-texture text glyph))
+        (set! (.. m -rotation -z) rot)
+        (.set (.-position m) x y z)))
+    (doseq [[id ^js m] (es6-iterator-seq (.entries token-counts))]
+      (when-not (.has seen id)
+        (.remove scene m)
+        (.delete token-counts id)))))
+
+(defn- token-at
+  "The stack id of the chip under the pointer, or nil."
+  [{:keys [^js renderer ^js camera ^js tokens ^js raycaster]} ^js e]
+  (let [rect (.getBoundingClientRect (.-domElement renderer))
+        ndc (THREE/Vector2. (- (* 2 (/ (- (.-clientX e) (.-left rect)) (.-width rect))) 1)
+                            (+ (* -2 (/ (- (.-clientY e) (.-top rect)) (.-height rect))) 1))
+        chips (into-array (for [^js g (es6-iterator-seq (.values tokens))] (.. g -userData -chip)))]
+    (.setFromCamera raycaster ndc camera)
+    (some-> ^js (first (.intersectObjects raycaster chips false)) .-object .-userData .-stack)))
+
 (defn- sync-tokens!
   "A token is a group (position, shadow) holding the chip mesh, which turns
   over when a click is spent."
   [{:keys [^js scene ^js tokens]} entries]
   (let [seen (js/Set.)]
-    (doseq [{:keys [id kind level pos flipped]} entries]
+    (doseq [{:keys [id kind level pos flipped stack]} entries]
       (.add seen id)
       (let [[x y z] pos
             flip (if flipped js/Math.PI 0)
@@ -934,6 +1014,9 @@
                             (set! (.. chip -rotation -x) flip)
                             (.add g chip)
                             (set! (.. g -userData -chip) chip)
+                            (set! (.. chip -userData -stack) stack) ; for hover hits
+                            (set! (.. g -userData -stack) stack)
+                            (set! (.. g -userData -level) level)
                             (when (zero? level)
                               (let [^js shadow (plane (* 2.6 chip-radius) (* 2.6 chip-radius)
                                                       (THREE/MeshBasicMaterial. #js {:map (shadow-texture) :transparent true
@@ -955,14 +1038,17 @@
 
 (defn- lerp-tokens!
   "Glides chips to their places and turns clicks over with a little hop; a
-  chip's shadow stays on the table."
-  [^js tokens moving]
+  hovered stack fans out so each chip shows. A chip's shadow stays on the table."
+  [^js tokens hovered-stack moving]
   (doseq [^js g (es6-iterator-seq (.values tokens))]
     (let [^js t (.. g -userData -target)
           ^js chip (.. g -userData -chip)
           ^js p (.-position g)
+          ty (if (and hovered-stack (= hovered-stack (.. g -userData -stack)))
+               (+ (aget t 1) chip-hover-lift (* (.. g -userData -level) chip-hover-gap))
+               (aget t 1))
           x (approach (.-x p) (aget t 0))
-          y (approach (.-y p) (aget t 1))
+          y (approach (.-y p) ty)
           z (approach (.-z p) (aget t 2))
           fx (.. chip -rotation -x)
           ft (aget t 3)
@@ -986,6 +1072,7 @@
     (sync-run-marker! ctx run-marker)
     (sync-run-lane! ctx run-lane)
     (sync-tokens! ctx tokens)
+    (sync-token-counts! ctx (token-counts me cards))
     (when (not= bounds (:bounds @view))
       (swap! view assoc :bounds bounds)
       (fit-camera! ctx))))
@@ -1118,7 +1205,7 @@
 (defn- lerp-objects!
   "Glides every card towards its target position, and the hovered card towards
   its tilt and holo state. Returns true while anything is still moving."
-  [{:keys [objects ^js run-marker ^js run-lane hover inspect ^js camera ^js tokens]}]
+  [{:keys [objects ^js run-marker ^js run-lane hover inspect ^js camera ^js tokens token-hover]}]
   (let [moving (volatile! false)
         now (/ (js/performance.now) 1000) ; seconds, for the run card's animation
         {hover-id :id [hu hv] :uv} @hover
@@ -1224,7 +1311,7 @@
     (when (.-visible run-lane)
       (set! (.. run-lane -material -uniforms -uTime -value) now)
       (vreset! moving true))
-    (lerp-tokens! tokens moving)
+    (lerp-tokens! tokens @token-hover moving)
     @moving))
 
 (defn- card-at
@@ -1303,7 +1390,7 @@
         ;; stop auto-framing as soon as the player rotates, pans or zooms
         (.addEventListener controls "start" #(swap! view assoc :user-moved true))
         {:renderer renderer :scene scene :camera camera :controls controls
-         :objects (js/Map.) :labels (js/Map.) :tokens (js/Map.) :run-marker run-marker :run-lane run-lane
+         :objects (js/Map.) :labels (js/Map.) :tokens (js/Map.) :token-counts (js/Map.) :token-hover (atom nil) :run-marker run-marker :run-lane run-lane
          :table table :table-top table-top :table-edge table-edge
          ;; playmat URL currently shown (nil until the first frame applies the setting)
          :playmat (atom nil)
@@ -1501,6 +1588,7 @@
                 (board/close-card-menu)))))
         on-pointer-move
         (fn [^js e]
+          (reset! (:token-hover @ctx) (token-at @ctx e))
           (let [{:keys [card back? uv] :as entry} (card-at @ctx e)
                 id (:id entry)
                 zoomable (and card (may-zoom? card back?))]
@@ -1523,6 +1611,7 @@
                            (reset! hovered nil)
                            (reset! hovered-card? false)
                            (some-> @ctx :hover (reset! nil))
+                           (some-> @ctx :token-hover (reset! nil))
                            (put! zoom-channel false)
                            (clear-zoom-pointer!))
         animate (fn animate []
