@@ -462,7 +462,10 @@
   "Creates renderer, scene, camera and controls in `container`. Returns nil if WebGL is unavailable."
   [container me]
   (try
-    (let [renderer (THREE/WebGLRenderer. #js {:antialias true :alpha true})
+    ;; preserveDrawingBuffer: we only draw when something changed, so the canvas
+    ;; must keep its last frame. Without it, browsers may show a cleared canvas
+    ;; whenever the page recomposites (e.g. every second when the match timer ticks).
+    (let [renderer (THREE/WebGLRenderer. #js {:antialias true :alpha true :preserveDrawingBuffer true})
           scene (THREE/Scene.)
           camera (THREE/PerspectiveCamera. 45 1 0.1 100)
           controls (OrbitControls. camera (.-domElement renderer))
@@ -526,15 +529,23 @@
       [(- (apply min xs) pad-x) (+ (apply max xs) pad-x)
        (- (apply min zs) pad-z) (+ (apply max zs) pad-z)])))
 
-(defn- resize! [{:keys [^js renderer ^js camera view] :as ctx} ^js container]
+(defn- resize! [{:keys [^js renderer ^js camera ^js scene view] :as ctx} ^js container]
   (let [w (max 1 (.-clientWidth container))
-        h (max 1 (.-clientHeight container))]
-    (.setSize renderer w h)
-    (set! (.-aspect camera) (/ w h))
-    (.updateProjectionMatrix camera)
-    (swap! view assoc :aspect (/ w h))
-    (fit-camera! ctx)
-    (reset! redraw-requested true)))
+        h (max 1 (.-clientHeight container))
+        ^js size (.getSize renderer (THREE/Vector2.))]
+    (when (or (not= w (.-x size)) (not= h (.-y size)))
+      ;; only the drawing buffer: the canvas' CSS size is 100% of its holder.
+      ;; Setting a pixel width here (clientWidth is rounded) can overflow the
+      ;; scrollable central pane by a fraction of a pixel, which toggles its
+      ;; scrollbars and resizes the canvas again in a loop.
+      (.setSize renderer w h false)
+      (set! (.-aspect camera) (/ w h))
+      (.updateProjectionMatrix camera)
+      (swap! view assoc :aspect (/ w h))
+      (fit-camera! ctx)
+      ;; setSize clears the canvas: draw right away (ResizeObserver callbacks run
+      ;; before the browser paints) instead of waiting for the next animation frame
+      (.render renderer scene camera))))
 
 (defn- dispose! [{:keys [^js renderer ^js controls]}]
   (.dispose controls)
