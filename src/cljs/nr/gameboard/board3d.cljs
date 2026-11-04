@@ -166,7 +166,9 @@
       (case where
         :ice (not (:rezzed card))
         :content (not (faceup? card))
-        (:pile :run) false
+        ;; my own hand: always face up (board/draw-facedown? is for installed
+        ;; cards and would hide unrezzed-type corp cards like ice and agendas)
+        (:pile :run :hand) false
         (board/draw-facedown? card))))
 
 (defn- may-zoom?
@@ -248,14 +250,30 @@
     top-card (conj (card-entry top-card :pile [x (+ 0.002 (* 0.003 (min cnt 40))) z] 0))))
 
 (defn- hand-entries
-  "Entries for the cards in my hand, in hand order."
+  "Entries for my hand (fanned) and for my cards being played: the cards in my
+  play area (e.g. an event resolving) and a hand card my open prompt is about
+  (e.g. where to install it). Those are staged: they hang big over the board."
   [me]
-  (let [hand (get-in @game-state [me :hand])
-        n (count hand)]
-    (vec (map-indexed (fn [i card]
-                        (assoc (card-entry card :hand [0 0 0] 0)
-                               :hand true :hand-index i :hand-count n))
-                      hand))))
+  (let [gs @game-state
+        prompt-cid (get-in gs [me :prompt-state :card :cid])
+        held? #(and prompt-cid (= (:cid %) prompt-cid))
+        hand (get-in gs [me :hand])
+        fan (remove held? hand)
+        n (count fan)
+        ;; a run event that started its run floats at the attacked server
+        ;; instead (see layout's run-card)
+        run-source-cid (get-in gs [:run :source-card :cid])
+        staged (concat (filter held? hand)
+                       (remove #(and run-source-cid (= (:cid %) run-source-cid))
+                               (get-in gs [me :play-area])))]
+    (into (vec (map-indexed (fn [i card]
+                              (assoc (card-entry card :hand [0 0 0] 0)
+                                     :hand true :hand-index i :hand-count n))
+                            fan))
+          (map-indexed (fn [i card]
+                         (assoc (card-entry card :hand [0 0 0] 0)
+                                :hand true :staged true :stage-index i))
+                       staged))))
 
 (defn- layout
   "Returns {:cards [...] :labels [...] :run-marker ...} for the current game state."
@@ -574,6 +592,10 @@
 (def hand-max-angle 0.07)   ; radians between neighbours
 (def hand-max-spread 0.75)  ; share of the view's width the fan may use
 (def hand-speed 0.25)
+;; a played card first rises from the hand to hang big over the board, then
+;; drops to its place; while a decision about it is open it stays up there
+(def stage-card-height 0.5) ; share of the view's height
+(def stage-dwell-ms 550)    ; how long a played card hangs before it drops
 (def hand-full-size-cards 6) ; more cards than this shrink the hand...
 (def hand-min-scale 0.6)     ; ...down to this
 (def hand-angle-jitter 0.035) ; radians: cards held by hand never line up exactly
@@ -728,6 +750,21 @@
   the camera (laid out in camera space by hand-pose!). A card changing between
   the two is re-attached keeping its place in the world, so it flies over."
   [{:keys [^js scene ^js camera ^js objects]} entries me]
+  ;; the server gives a card a new cid when it leaves e.g. the play area for
+  ;; the discard pile; hand such a card's object over to its new id, so it
+  ;; travels on instead of vanishing (matched by card code)
+  (let [ids (set (keep :id entries))
+        orphans (volatile! (vec (for [[id ^js obj] (es6-iterator-seq (.entries objects))
+                                      :when (and (not (ids id)) (identical? (.-parent obj) camera))]
+                                  [id obj])))]
+    (doseq [{:keys [id card]} entries
+            :when (and id (:code card) (not (.has objects id)))]
+      (when-let [[old-id ^js obj] (first (filter (fn [[_ ^js o]]
+                                                   (= (:code card) (get-in (.. o -userData -entry) [:card :code])))
+                                                 @orphans))]
+        (vswap! orphans (fn [os] (vec (remove #(= old-id (first %)) os))))
+        (.delete objects old-id)
+        (.set objects id obj))))
   (let [seen (js/Set.)]
     (doseq [{:keys [id hand] :as entry} entries
             :when id]
@@ -746,11 +783,20 @@
                       (.set objects id o)
                       o))
             ^js ud (.-userData obj)]
-        (when-not (identical? (.-parent obj) parent)
-          (.attach parent obj)
-          ;; landing on the table: fly-card! turns it flat on the way
-          (when-not hand (set! (.-flying ud) true)))
-        (set! (.-inHand ud) (boolean hand))
+        (cond
+          ;; back into the hand (or new to it)
+          (and hand (not (identical? (.-parent obj) camera)))
+          (.attach camera obj)
+          ;; played from the hand: hangs over the board a moment first, then
+          ;; drops (see lerp-objects!)
+          (and (not hand) (identical? (.-parent obj) camera))
+          (when-not (.-dropAt ud)
+            (set! (.-dropAt ud) (+ (js/performance.now) stage-dwell-ms)))
+          :else nil)
+        (when hand (set! (.-dropAt ud) nil))
+        (set! (.-inHand ud) (identical? (.-parent obj) camera))
+        (set! (.-staged ud) (boolean (or (:staged entry) (.-dropAt ud))))
+        (set! (.-stageIndex ud) (or (:stage-index entry) 0))
         (update-card-object! obj entry)))
     (doseq [[id ^js obj] (es6-iterator-seq (.entries objects))]
       (when-not (.has seen id)
@@ -1329,10 +1375,31 @@
           (let [k (+ (.-x sv) (* hand-speed (- sc (.-x sv))))] (.set sv k k k))
           true))))
 
+(defn- stage-pose!
+  "Glides a card being played to hang big over the middle of the board, gently
+  floating. Returns true (it keeps floating)."
+  [^js obj {:keys [x y h]} now]
+  (let [^js ud (.-userData obj)
+        i (.-stageIndex ud)
+        s (/ (* stage-card-height h) card-h)
+        bob (* 0.01 (js/Math.sin (* now 2.1)))
+        ^js p (.-position obj)
+        ^js q (.-quaternion obj)
+        ^js sv (.-scale obj)]
+    ;; above the middle of the view; several cards side by side
+    (.set hand-v (+ x (* i 0.7 s card-w)) (+ y (* 0.56 h) bob) (- (+ hand-distance 0.25)))
+    (.multiplyQuaternions hand-q (.setFromAxisAngle hand-zq z-unit (* 0.03 (js/Math.sin (* now 1.3)))) face-camera-q)
+    (set! (.. ud -shadow -visible) false)
+    (set! (.. ud -drop -visible) false)
+    (.lerp p hand-v hand-speed)
+    (.slerp q hand-q hand-speed)
+    (let [k (+ (.-x sv) (* hand-speed (- s (.-x sv))))] (.set sv k k k))
+    true))
+
 (defn- lerp-objects!
   "Glides every card towards its target position, and the hovered card towards
   its tilt and holo state. Returns true while anything is still moving."
-  [{:keys [objects ^js run-marker ^js run-lane hover inspect ^js camera ^js tokens token-hover]}]
+  [{:keys [objects ^js run-marker ^js run-lane hover inspect ^js camera ^js scene ^js tokens token-hover]}]
   (let [moving (volatile! false)
         now (/ (js/performance.now) 1000) ; seconds, for the run card's animation
         {hover-id :id [hu hv] :uv} @hover
@@ -1341,8 +1408,20 @@
     (doseq [[id ^js obj] (es6-iterator-seq (.entries objects))]
       (cond
         (.. obj -userData -inHand)
-        (when (hand-pose! obj hand (= id hover-id))
-          (vreset! moving true))
+        (let [^js ud (.-userData obj)
+              drop-at (.-dropAt ud)]
+          (if (and drop-at (>= (js/performance.now) drop-at))
+            ;; done hanging: drop onto the table (fly-card! lays it down)
+            (do (.attach scene obj)
+                (set! (.-dropAt ud) nil)
+                (set! (.-inHand ud) false)
+                (set! (.-staged ud) false)
+                (set! (.-flying ud) true)
+                (vreset! moving true))
+            (when (if (.-staged ud)
+                    (stage-pose! obj hand now)
+                    (hand-pose! obj hand (= id hover-id)))
+              (vreset! moving true))))
 
         (and (.. obj -userData -target)
              (or (= id inspect-id) (.. obj -userData -flying)))
