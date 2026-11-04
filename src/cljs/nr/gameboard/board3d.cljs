@@ -246,7 +246,8 @@
                                      :rd nil
                                      :archives nil
                                      nil)]]
-                 (concat
+                 (cond->>
+                   (concat
                    (when central [central])
                    (when (= k :rd)
                      (pile-entry "corp-deck" "Corp" (get-in gs [:corp :deck-count] 0) nil
@@ -262,7 +263,9 @@
                              (with-hosted ice :ice
                                [x 0 (+ corp-z (* to-center (+ (/ card-h 2) 0.18 (/ card-w 2) (* j ice-step))))]
                                (/ js/Math.PI 2)))
-                           (range) ices))))
+                           (range) ices))
+                   ;; the attacked server's cards shimmer while the run is on
+                   (= k run-server) (map #(cond-> % (:card %) (assoc :under-attack true))))))
         labels (for [[i k] (map-indexed vector order)]
                  {:id (str "label-" (name k))
                   :text (server-label k servers)
@@ -311,10 +314,20 @@
                            z (if (and (pos? pos) (<= pos (count ices)))
                                (+ corp-z (* to-center (+ (/ card-h 2) 0.18 (/ card-w 2) (* (dec pos) ice-step))))
                                corp-z)]
-                       {:x (col-x col) :z z :phase (:phase run)}))]
+                       {:x (col-x col) :z z :phase (:phase run)}))
+        ;; animated lane under the attacked column: from where the runner comes
+        ;; in (the floating event, or just outside the outermost ice) to behind
+        ;; the server's root
+        run-lane (when run-marker
+                   (let [n-ice (count (get-in servers [run-server :ices]))
+                         outer (+ corp-z (* to-center (+ (/ card-h 2) 0.18 (/ card-w 2) (* n-ice ice-step) 0.45)))
+                         from (if run-card (get-in run-card [:pos 2]) outer)
+                         to (- corp-z (* to-center (+ (/ card-h 2) 0.1)))]
+                     {:x (:x run-marker) :from (+ from (* to-center 0.5)) :to to :phase (:phase run)}))]
     {:cards (vec (concat corp-cards runner-cards runner-piles (when run-card [run-card])))
      :labels (vec labels)
-     :run-marker run-marker}))
+     :run-marker run-marker
+     :run-lane run-lane}))
 
 ;;; three.js scene management
 
@@ -387,6 +400,76 @@
          :fragmentShader card-fragment-shader
          :transparent true}))
 
+;;; Attack lane: animated strip under the attacked column during a run.
+;;; u runs across the lane, v along it (0 = runner side, 1 = server).
+
+(def ^:private lane-fragment-shader
+  "uniform float uTime;
+   uniform vec3 uColor;
+   uniform float uFlip;    // 1.0 when the lane's v axis must be reversed
+   varying vec2 vUv;
+
+   float hash(float n) { return fract(sin(n) * 43758.5453); }
+   float noise(float x) {
+     float i = floor(x);
+     return mix(hash(i), hash(i + 1.0), smoothstep(0.0, 1.0, fract(x)));
+   }
+
+   void main() {
+     float u = vUv.x;
+     float v = mix(vUv.y, 1.0 - vUv.y, uFlip);
+     // (smoothstep needs edge0 < edge1: reversed edges are undefined in GLSL)
+     float edge = smoothstep(0.0, 0.25, u) * (1.0 - smoothstep(0.75, 1.0, u));
+     float ends = smoothstep(0.0, 0.12, v) * (1.0 - smoothstep(0.9, 1.0, v));
+
+     // soft glow and pulses flowing towards the server
+     float glow = 0.28 * edge;
+     float flow = pow(fract(v * 4.0 - uTime * 0.9), 6.0) * edge * 0.7;
+
+     // two jagged electric arcs, re-shaped ~12 times a second, flickering
+     float arcs = 0.0;
+     for (int k = 0; k < 2; k++) {
+       float fk = float(k);
+       float t = floor(uTime * 12.0 + fk * 7.0);
+       float off = (noise(v * 9.0 + t * 1.7 + fk * 31.0) - 0.5) * 0.5
+                 + (noise(v * 23.0 + t * 3.1) - 0.5) * 0.15;
+       float d = abs(u - 0.5 - off);
+       float on = step(0.35, hash(t + fk * 13.0));
+       arcs += on * ((1.0 - smoothstep(0.0, 0.03, d)) + 0.35 * (1.0 - smoothstep(0.0, 0.12, d)));
+     }
+
+     // sparks drifting towards the server
+     float sparks = 0.0;
+     vec2 cell = vec2(u * 6.0, v * 18.0 - uTime * 2.2);
+     vec2 id = floor(cell);
+     vec2 f = fract(cell) - 0.5;
+     float h = hash(id.x * 17.0 + id.y * 131.0);
+     if (h > 0.82) {
+       vec2 c = vec2(hash(h * 7.0) - 0.5, hash(h * 11.0) - 0.5) * 0.6;
+       sparks = (1.0 - smoothstep(0.0, 0.12, length(f - c))) * (0.5 + 0.5 * sin(uTime * 20.0 + h * 50.0));
+     }
+
+     float a = (glow + flow + arcs * 0.9 + sparks) * ends;
+     vec3 col = uColor * a + vec3(1.0) * arcs * 0.35 * ends;
+     gl_FragColor = vec4(col, 1.0);
+     #include <colorspace_fragment>
+   }")
+
+(defn- lane-material []
+  (THREE/ShaderMaterial.
+    #js {:uniforms #js {:uTime #js {:value 0}
+                        :uColor #js {:value (THREE/Color. "#4aa3ff")}
+                        :uFlip #js {:value 0}}
+         :vertexShader card-vertex-shader
+         :fragmentShader lane-fragment-shader
+         :transparent true
+         :depthWrite false
+         :blending THREE/AdditiveBlending}))
+
+(def run-phase-colors
+  {"encounter-ice" "#ff4d4d"
+   "approach-ice" "#ffcc00"})
+
 (def hover-tilt 0.2)   ; radians at the card's edge
 (def hover-lift 0.12)  ; how far a hovered card rises off the table
 
@@ -426,7 +509,7 @@
     (set! (.. group -userData -overlay) overlay)
     group))
 
-(defn- update-card-object! [^js group {:keys [url highlight badges strength pile count pos rot float push-dir] :as entry}]
+(defn- update-card-object! [^js group {:keys [url highlight badges strength pile count pos rot float push-dir under-attack] :as entry}]
   (let [^js ud (.-userData group)
         ^js front (.-front ud)
         ^js glow (.-glow ud)
@@ -435,6 +518,10 @@
         [x y z] pos]
     (set! (.-entry ud) entry)
     (set! (.-float ud) (boolean float))
+    (set! (.-underAttack ud) (boolean under-attack))
+    ;; per-card phase, so shimmering cards don't move in sync
+    (when (nil? (.-seed ud))
+      (set! (.-seed ud) (* 100 (js/Math.random))))
     (set! (.-pushDir ud) (or push-dir 0))
     (set! (.-visible shadow) (boolean float))
     ;; the shadow lies on the table below the floating card
@@ -518,14 +605,28 @@
       (set! (.. run-marker -userData -target) #js [x 0.35 z]))
     (set! (.-visible run-marker) false)))
 
+(defn- sync-run-lane! [{:keys [^js run-lane]} lane]
+  (if lane
+    (let [{:keys [x from to phase]} lane
+          ^js uniforms (.. run-lane -material -uniforms)]
+      (set! (.-visible run-lane) true)
+      (.set (.-position run-lane) x -0.003 (/ (+ from to) 2))
+      ;; the plane lies flat: its local y is the lane's length
+      (.set (.-scale run-lane) (* 0.85 col-w) (js/Math.abs (- from to)) 1)
+      ;; the plane's v runs from +z to -z; reverse it when the runner is on the -z side
+      (set! (.. uniforms -uFlip -value) (if (> from to) 0 1))
+      (.set (.. uniforms -uColor -value) (get run-phase-colors phase "#4aa3ff")))
+    (set! (.-visible run-lane) false)))
+
 (declare fit-camera! card-bounds)
 
 (defn- sync-scene! [{:keys [view] :as ctx} me]
-  (let [{:keys [cards labels run-marker]} (layout me)
+  (let [{:keys [cards labels run-marker run-lane]} (layout me)
         bounds (card-bounds cards)]
     (sync-cards! ctx cards me)
     (sync-labels! ctx labels (filter :pile cards))
     (sync-run-marker! ctx run-marker)
+    (sync-run-lane! ctx run-lane)
     (when (not= bounds (:bounds @view))
       (swap! view assoc :bounds bounds)
       (fit-camera! ctx))))
@@ -540,7 +641,7 @@
 (defn- lerp-objects!
   "Glides every card towards its target position, and the hovered card towards
   its tilt and holo state. Returns true while anything is still moving."
-  [{:keys [objects ^js run-marker hover]}]
+  [{:keys [objects ^js run-marker ^js run-lane hover]}]
   (let [moving (volatile! false)
         now (/ (js/performance.now) 1000) ; seconds, for the run card's animation
         {hover-id :id [hu hv] :uv} @hover]
@@ -592,7 +693,18 @@
             (set! (.. shadow -position -z) (+ push 0.12))
             (.set (.-scale shadow) (- 1 (* 0.08 pulse)) 1 (- 1 (* 0.08 pulse)))
             (set! (.. uniforms -uHolo -value) (approach (.. uniforms -uHolo -value) th)))
-          (let [rx (approach (.-x tr) tx)
+          (let [;; the attacked server's cards stay on the table but shimmer: a
+                ;; wandering virtual pointer, each card on its own rhythm
+                attacked (and (.-underAttack ud) (not hovered))
+                [tx tz th] (if attacked
+                             (let [s (+ now (.-seed ud))
+                                   au (+ 0.5 (* 0.3 (js/Math.sin (* s 0.91))) (* 0.12 (js/Math.sin (+ (* s 2.3) 0.7))))
+                                   av (+ 0.5 (* 0.3 (js/Math.sin (+ (* s 0.73) 1.9))) (* 0.12 (js/Math.sin (+ (* s 1.7) 2.6))))]
+                               (vreset! moving true)
+                               (.set (.. uniforms -uPointer -value) au av)
+                               [(* (- av 0.5) 2 hover-tilt 0.25) (* (- au 0.5) 2 hover-tilt 0.25) 0.6])
+                             [tx tz th])
+                rx (approach (.-x tr) tx)
                 rz (approach (.-z tr) tz)
                 ly (approach (.. tilt -position -y) ty)
                 lz (approach (.. tilt -position -z) 0)
@@ -619,6 +731,9 @@
         ;; the marker spins while a run is active
         (set! (.. run-marker -rotation -y) (+ (.. run-marker -rotation -y) 0.03))
         (vreset! moving true)))
+    (when (.-visible run-lane)
+      (set! (.. run-lane -material -uniforms -uTime -value) now)
+      (vreset! moving true))
     @moving))
 
 (defn- card-at
@@ -651,7 +766,8 @@
           table (plane 13 9.5 (THREE/MeshBasicMaterial. #js {:color "#0b0f14" :transparent true :opacity 0.55}))
           grid (THREE/GridHelper. 13 26 "#24303c" "#18202a")
           run-marker (THREE/Mesh. (THREE/ConeGeometry. 0.22 0.45 4)
-                                  (THREE/MeshBasicMaterial. #js {:color "#ff4d4d"}))]
+                                  (THREE/MeshBasicMaterial. #js {:color "#ff4d4d"}))
+          run-lane (plane 1 1 (lane-material))]
       (.setPixelRatio renderer (min 2 (.-devicePixelRatio js/window)))
       (.appendChild container (.-domElement renderer))
       (set! (.. table -position -y) -0.01)
@@ -661,6 +777,8 @@
       (set! (.. run-marker -rotation -x) js/Math.PI)
       (set! (.-visible run-marker) false)
       (.add scene run-marker)
+      (set! (.-visible run-lane) false)
+      (.add scene run-lane)
       (set! (.-enableDamping controls) true)
       (set! (.-maxPolarAngle controls) 1.35)
       (set! (.-minDistance controls) 2)
@@ -668,7 +786,7 @@
         ;; stop auto-framing as soon as the player rotates, pans or zooms
         (.addEventListener controls "start" #(swap! view assoc :user-moved true))
         {:renderer renderer :scene scene :camera camera :controls controls
-         :objects (js/Map.) :labels (js/Map.) :run-marker run-marker
+         :objects (js/Map.) :labels (js/Map.) :run-marker run-marker :run-lane run-lane
          :raycaster (THREE/Raycaster.) :view view
          ;; {:id card-id :uv [u v]} of the card under the pointer
          :hover (atom nil)}))
