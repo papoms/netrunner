@@ -745,13 +745,247 @@
 
 (declare fit-camera! card-bounds)
 
+(declare approach)
+
+;;; Tokens: credits and clicks as ceramic poker chips. Each player's sit on
+;;; their half of the table close to the middle line, outside the cards:
+;;; credits on the player's left (stacks of 5, 3 and 1, left to right), clicks
+;;; on their right (one chip per click of a turn, in a row; spent clicks are
+;;; flipped over to their plain dark side).
+
+(def chip-radius 0.19)
+(def chip-height 0.045)
+(def chip-spacing 0.43)
+(def chip-stack-max 10)  ; taller stacks are split
+(def chip-z 0.45)        ; distance from the middle line
+
+(def chip-kinds
+  ;; glyphs of the anr-icon font (see fonts.styl), how many on the top, and
+  ;; the colour of the rim inlays
+  {:credit-5 {:glyph "" :n 5 :accent "#e8743b"}
+   :credit-3 {:glyph "" :n 3 :accent "#4a90e2"}
+   :credit-1 {:glyph "" :n 1 :accent "#f2f2f2"}
+   ;; plain black and white
+   :click    {:glyph "" :n 1 :accent nil}})
+
+(defonce icon-font-ready (atom false))
+
+(defn- ensure-icon-font!
+  "The chip faces draw glyphs from the anr-icon web font: redraw them once it has loaded."
+  []
+  (when-not @icon-font-ready
+    (reset! icon-font-ready :loading)
+    (-> (.load js/document.fonts "100px anr-icon")
+        (.then (fn [_]
+                 (reset! icon-font-ready true)
+                 (doseq [k (keys chip-kinds)]
+                   (when-let [^js t (.get texture-cache (str "chip-top-" (name k)))]
+                     (when-let [redraw (.. t -userData -redraw)] (redraw))
+                     (set! (.-needsUpdate t) true)))
+                 (reset! redraw-requested true))))))
+
+(defn- draw-chip-top [kind ^js ctx]
+  (let [{:keys [glyph n accent]} (chip-kinds kind)
+        c 128
+        tau (* 2 js/Math.PI)]
+    ;; drawn in 256 units on a 512 canvas, for crisp logos
+    (.setTransform ctx 2 0 0 2 0 0)
+    (.clearRect ctx 0 0 256 256)
+    ;; glazed dark body
+    (let [^js g (.createRadialGradient ctx 100 96 10 c c 128)]
+      (.addColorStop g 0 "#3a3c42")
+      (.addColorStop g 1 "#16171a")
+      (set! (.-fillStyle ctx) g))
+    (.fillRect ctx 0 0 256 256)
+    ;; inlays around the rim, like a casino chip
+    (when accent
+      (set! (.-fillStyle ctx) accent)
+      (dotimes [i 8]
+        (.save ctx)
+        (.translate ctx c c)
+        (.rotate ctx (* i (/ tau 8)))
+        (.fillRect ctx -11 -127 22 16)
+        (.restore ctx)))
+    ;; white ring
+    (set! (.-strokeStyle ctx) "#f4f4f4")
+    (set! (.-lineWidth ctx) 6)
+    (.beginPath ctx) (.arc ctx c c 100 0 tau) (.stroke ctx)
+    ;; the logo(s)
+    (set! (.-fillStyle ctx) "#f4f4f4")
+    (set! (.-textAlign ctx) "center")
+    (set! (.-textBaseline ctx) "middle")
+    (let [spots (case n
+                  1 [[0 0 (if (= kind :click) 150 135)]]
+                  3 [[-33 -24 80] [33 -24 80] [0 34 80]]
+                  5 [[0 0 70] [-44 -40 54] [44 -40 54] [-44 42 54] [44 42 54]])]
+      (doseq [[x y size] spots]
+        (set! (.-font ctx) (str size "px anr-icon"))
+        (.fillText ctx glyph (+ c x) (+ c y 2))))))
+
+(defn- chip-top-texture [kind]
+  (ensure-icon-font!)
+  (let [k (str "chip-top-" (name kind))
+        ^js t (canvas-texture k 512 512 #(draw-chip-top kind %))]
+    (set! (.. t -userData -redraw) #(draw-chip-top kind (.getContext (.-image t) "2d")))
+    t))
+
+(defn- chip-side-texture [kind]
+  (let [{:keys [accent]} (chip-kinds kind)]
+    (canvas-texture (str "chip-side-" (name kind)) 256 16
+                    (fn [^js ctx]
+                      (set! (.-fillStyle ctx) "#1b1c20")
+                      (.fillRect ctx 0 0 256 16)
+                      ;; edge spots matching the inlays on top
+                      (when accent
+                        (set! (.-fillStyle ctx) accent)
+                        (dotimes [i 8]
+                          (.fillRect ctx (+ 8 (* i 32)) 3 16 10)))))))
+
+(defn- chip-back-texture
+  "The plain dark side a spent click is flipped to."
+  []
+  (canvas-texture "chip-back" 256 256
+                  (fn [^js ctx]
+                    (let [^js g (.createRadialGradient ctx 100 96 10 128 128 128)]
+                      (.addColorStop g 0 "#2c2d32")
+                      (.addColorStop g 1 "#111215")
+                      (set! (.-fillStyle ctx) g))
+                    (.fillRect ctx 0 0 256 256)
+                    (set! (.-strokeStyle ctx) "#3a3b40")
+                    (set! (.-lineWidth ctx) 3)
+                    (.beginPath ctx) (.arc ctx 128 128 100 0 (* 2 js/Math.PI)) (.stroke ctx))))
+
+(def ^:private chip-geometry
+  (delay (THREE/CylinderGeometry. chip-radius chip-radius chip-height 48 1)))
+
+(defonce ^:private chip-materials (js/Map.))
+
+(defn- chip-material
+  "[side top bottom] materials of a chip; lit and shiny like glazed ceramic."
+  [kind]
+  (or (.get chip-materials kind)
+      (let [glaze (fn [tex] (THREE/MeshPhongMaterial. #js {:map tex :shininess 70 :specular "#555555"}))
+            top (glaze (chip-top-texture kind))
+            ;; cylinder material groups: side, top, bottom
+            m #js [(glaze (chip-side-texture kind)) top
+                   (if (= kind :click) (glaze (chip-back-texture)) top)]]
+        (.set chip-materials kind m)
+        m)))
+
+(defn- token-layout
+  "Chip entries {:id :kind :pos} for both players. `cards` (the card entries)
+  tell how far out the chips must sit to stay clear of them."
+  [me cards]
+  (let [gs @game-state
+        extent (+ (apply max 1.2 (map #(js/Math.abs (get-in % [:pos 0])) cards))
+                  (/ card-h 2) 0.35)]
+    (vec
+      (for [side [:corp :runner]
+            :let [f (if (= side me) 1 -1)   ; my side of the table is +z
+                  left (- f)                ; a player's left, in world x
+                  z (* f chip-z)
+                  credits (max 0 (or (get-in gs [side :credit]) 0))
+                  clicks (max 0 (min 8 (or (get-in gs [side :click]) 0)))
+                  ;; a chip per click of a turn (more if extra clicks were gained);
+                  ;; the server doesn't send click-per-turn, so use the standard
+                  click-chips (max clicks (min 8 (or (get-in gs [side :click-per-turn])
+                                                     (if (= side :corp) 3 4))))
+                  fives (quot credits 5)
+                  threes (quot (mod credits 5) 3)
+                  ones (mod (mod credits 5) 3)
+                  ;; left to right: 5s, 3s, 1s; split tall stacks
+                  stacks (vec (for [[kind cnt] [[:credit-5 fives] [:credit-3 threes] [:credit-1 ones]]
+                                    part (range (js/Math.ceil (/ cnt chip-stack-max)))]
+                                [kind (min chip-stack-max (- cnt (* part chip-stack-max))) part]))
+                  n (count stacks)]
+            entry (concat
+                    ;; the rightmost stack (1s) sits innermost
+                    (for [[i [kind cnt part]] (map-indexed vector stacks)
+                          level (range cnt)]
+                      {:id (str (name side) "-" (name kind) "-" part "-" level)
+                       :kind kind
+                       :level level
+                       :pos [(* left (+ extent (* (- n 1 i) chip-spacing)))
+                             (* level chip-height) z]})
+                    ;; unspent clicks innermost, spent ones flipped further out
+                    (for [i (range click-chips)]
+                      {:id (str (name side) "-click-" i)
+                       :kind :click
+                       :level 0
+                       :flipped (>= i clicks)
+                       :pos [(* (- left) (+ extent (* i chip-spacing))) 0 z]}))]
+        entry))))
+
+(defn- sync-tokens!
+  "A token is a group (position, shadow) holding the chip mesh, which turns
+  over when a click is spent."
+  [{:keys [^js scene ^js tokens]} entries]
+  (let [seen (js/Set.)]
+    (doseq [{:keys [id kind level pos flipped]} entries]
+      (.add seen id)
+      (let [[x y z] pos
+            flip (if flipped js/Math.PI 0)
+            ^js token (or (.get tokens id)
+                          (let [^js g (THREE/Group.)
+                                ^js chip (THREE/Mesh. @chip-geometry (chip-material kind))]
+                            ;; new chips drop in from above
+                            (.set (.-position g) x (+ y (/ chip-height 2) 0.6) z)
+                            (set! (.. chip -rotation -y) (* 2 js/Math.PI (js/Math.random)))
+                            (set! (.. chip -rotation -x) flip)
+                            (.add g chip)
+                            (set! (.. g -userData -chip) chip)
+                            (when (zero? level)
+                              (let [^js shadow (plane (* 2.6 chip-radius) (* 2.6 chip-radius)
+                                                      (THREE/MeshBasicMaterial. #js {:map (shadow-texture) :transparent true
+                                                                                     :opacity 0.5 :depthWrite false}))]
+                                (set! (.-renderOrder shadow) -1)
+                                (.add g shadow)
+                                (set! (.. g -userData -shadow) shadow)))
+                            (.add scene g)
+                            (.set tokens id g)
+                            g))]
+        (set! (.. token -userData -target) #js [x (+ y (/ chip-height 2)) z flip])))
+    (doseq [[id ^js g] (es6-iterator-seq (.entries tokens))]
+      (when-not (.has seen id)
+        (.remove scene g)
+        (.delete tokens id)))))
+
+(def chip-flip-speed 0.16)
+(def chip-flip-hop 0.12) ; how high a chip jumps while turning over
+
+(defn- lerp-tokens!
+  "Glides chips to their places and turns clicks over with a little hop; a
+  chip's shadow stays on the table."
+  [^js tokens moving]
+  (doseq [^js g (es6-iterator-seq (.values tokens))]
+    (let [^js t (.. g -userData -target)
+          ^js chip (.. g -userData -chip)
+          ^js p (.-position g)
+          x (approach (.-x p) (aget t 0))
+          y (approach (.-y p) (aget t 1))
+          z (approach (.-z p) (aget t 2))
+          fx (.. chip -rotation -x)
+          ft (aget t 3)
+          f (if (< (js/Math.abs (- ft fx)) 0.002) ft (+ fx (* chip-flip-speed (- ft fx))))]
+      (when (or (not= x (.-x p)) (not= y (.-y p)) (not= z (.-z p)) (not= f fx))
+        (vreset! moving true)
+        (.set p x y z)
+        (set! (.. chip -rotation -x) f)
+        ;; up while on edge, back down when flat
+        (set! (.. chip -position -y) (* chip-flip-hop (js/Math.sin f)))
+        (when-let [^js shadow (.. g -userData -shadow)]
+          (set! (.. shadow -position -y) (+ (- y) 0.002)))))))
+
 (defn- sync-scene! [{:keys [view] :as ctx} me]
   (let [{:keys [cards labels run-marker run-lane]} (layout me)
-        bounds (card-bounds cards)]
+        tokens (token-layout me cards)
+        ;; chips count for the camera's framing too
+        bounds (card-bounds (concat cards (map #(update % :pos (fn [[x _ z]] [x 0 z])) tokens)))]
     (sync-cards! ctx cards me)
     (sync-labels! ctx labels (filter :pile cards))
     (sync-run-marker! ctx run-marker)
     (sync-run-lane! ctx run-lane)
+    (sync-tokens! ctx tokens)
     (when (not= bounds (:bounds @view))
       (swap! view assoc :bounds bounds)
       (fit-camera! ctx))))
@@ -884,7 +1118,7 @@
 (defn- lerp-objects!
   "Glides every card towards its target position, and the hovered card towards
   its tilt and holo state. Returns true while anything is still moving."
-  [{:keys [objects ^js run-marker ^js run-lane hover inspect ^js camera]}]
+  [{:keys [objects ^js run-marker ^js run-lane hover inspect ^js camera ^js tokens]}]
   (let [moving (volatile! false)
         now (/ (js/performance.now) 1000) ; seconds, for the run card's animation
         {hover-id :id [hu hv] :uv} @hover
@@ -990,6 +1224,7 @@
     (when (.-visible run-lane)
       (set! (.. run-lane -material -uniforms -uTime -value) now)
       (vreset! moving true))
+    (lerp-tokens! tokens moving)
     @moving))
 
 (defn- card-at
@@ -1068,7 +1303,7 @@
         ;; stop auto-framing as soon as the player rotates, pans or zooms
         (.addEventListener controls "start" #(swap! view assoc :user-moved true))
         {:renderer renderer :scene scene :camera camera :controls controls
-         :objects (js/Map.) :labels (js/Map.) :run-marker run-marker :run-lane run-lane
+         :objects (js/Map.) :labels (js/Map.) :tokens (js/Map.) :run-marker run-marker :run-lane run-lane
          :table table :table-top table-top :table-edge table-edge
          ;; playmat URL currently shown (nil until the first frame applies the setting)
          :playmat (atom nil)
@@ -1315,6 +1550,8 @@
            (let [canvas (.-domElement (:renderer c))
                  el @container]
              (reset! ctx c)
+             ;; dev builds: lets the console (and dev tooling) inspect the scene
+             (when ^boolean goog.DEBUG (set! (.-__board3d js/window) c))
              (resize! c el)
              (reset! resize-observer (js/ResizeObserver. #(resize! c el)))
              (.observe @resize-observer el)
