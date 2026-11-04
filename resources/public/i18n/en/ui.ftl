@@ -1717,7 +1717,7 @@ settings_email-title = Change email address
 
 settings_enable-game-sounds = Enable game sounds
 
-settings_experimental = Experimental
+settings_experimental-3d = Experimental 3D version
 
 settings_enable-lobby-sounds = Enable lobby sounds
 

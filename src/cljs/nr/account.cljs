@@ -518,27 +518,7 @@
                                :value true
                                :checked (:card-hover-movement @s)
                                :on-change #(swap! s assoc :card-hover-movement (.. % -target -checked))}]
-              [tr-span [:settings_card-hover-movement "Responsive cards in hand"]]]]]
-           [:br]
-           [tr-element :h4 [:settings_experimental "Experimental"]]
-           [:div
-            [:label [:input {:type "checkbox"
-                             :value true
-                             :checked (:board-3d @s)
-                             :on-change #(swap! s assoc :board-3d (.. % -target -checked))}]
-             [tr-span [:settings_board-3d "3D game board (three.js, experimental)"]]]
-            [:div
-             [:label [:input {:type "checkbox"
-                              :value true
-                              :checked (:board-3d-full-width @s)
-                              :on-change #(swap! s assoc :board-3d-full-width (.. % -target -checked))}]
-              [tr-span [:settings_board-3d-full-width "3D board fills the whole width (side panels float above it)"]]]]
-            [:div
-             [tr-span [:settings_board-3d-playmat "Playmat image for the 3D board (URL, Corp half on the left, Runner half on the right; empty for the plain table)"]]
-             [:div [:input {:type "text"
-                            :placeholder "/img/playmats/..."
-                            :on-change #(swap! s assoc :board-3d-playmat (.. % -target -value))
-                            :value (or (:board-3d-playmat @s) "")}]]]]]
+              [tr-span [:settings_card-hover-movement "Responsive cards in hand"]]]]]]
 
           (let [custom-bg-selected (= (:background @s) "custom-bg" )
                 custom-bg-url (r/cursor s [:custom-bg-url])]
@@ -677,14 +657,7 @@
                              :name "zoom-last-played-or-rezzed"
                              :checked (:zoom-last-played-or-rezzed @s)
                              :on-change #(swap! s assoc :zoom-last-played-or-rezzed (.. % -target -checked))}]
-             [tr-span [:settings_zoom-last-played-or-rezzed "Zoom the most recently rezzed or played card"]]]]
-           [:br]
-           [:div
-            [:label [:input {:type "checkbox"
-                             :name "card-zoom-holo"
-                             :checked (:card-zoom-holo @s)
-                             :on-change #(swap! s assoc :card-zoom-holo (.. % -target -checked))}]
-             [tr-span [:settings_card-zoom-holo "Holo effect on zoomed cards (tilts and shines as you move over a card)"]]]]]
+             [tr-span [:settings_zoom-last-played-or-rezzed "Zoom the most recently rezzed or played card"]]]]]
 
           [:section
            [tr-element :h3 [:settings_game-stats " Game Win/Lose statistics "]]
@@ -838,6 +811,34 @@
             [tr-span [:settings_disable-websockets "Disable websockets - requires browser refresh after clicking Update Profile [Not Recommended!]"]]]]]
 
           [api-keys s]
+
+          [:section
+           [tr-element :h3 [:settings_experimental-3d "Experimental 3D version"]]
+           [:div
+            [:label [:input {:type "checkbox"
+                             :value true
+                             :checked (:board-3d @s)
+                             :on-change #(swap! s assoc :board-3d (.. % -target -checked))}]
+             [tr-span [:settings_board-3d "3D game board (three.js, experimental)"]]]]
+           [:div
+            [:label [:input {:type "checkbox"
+                             :value true
+                             :checked (:board-3d-full-width @s)
+                             :on-change #(swap! s assoc :board-3d-full-width (.. % -target -checked))}]
+             [tr-span [:settings_board-3d-full-width "3D board fills the whole width (side panels float above it)"]]]]
+           [:div
+            [:label [:input {:type "checkbox"
+                             :name "card-zoom-holo"
+                             :checked (:card-zoom-holo @s)
+                             :on-change #(swap! s assoc :card-zoom-holo (.. % -target -checked))}]
+             [tr-span [:settings_card-zoom-holo "Holo effect on zoomed cards (tilts and shines as you move over a card)"]]]]
+           [:br]
+           [:div
+            [tr-span [:settings_board-3d-playmat "Playmat image for the 3D board (URL, Corp half on the left, Runner half on the right; empty for the plain table)"]]
+            [:div [:input {:type "text"
+                           :placeholder "/img/playmats/..."
+                           :on-change #(swap! s assoc :board-3d-playmat (.. % -target -value))
+                           :value (or (:board-3d-playmat @s) "")}]]]]
 
           [:section
            [:span.flash-message (:flash-message @s)]]]])})))
