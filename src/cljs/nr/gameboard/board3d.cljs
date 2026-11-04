@@ -322,7 +322,9 @@
                    (let [n-ice (count (get-in servers [run-server :ices]))
                          outer (+ corp-z (* to-center (+ (/ card-h 2) 0.18 (/ card-w 2) (* n-ice ice-step) 0.45)))
                          from (if run-card (get-in run-card [:pos 2]) outer)
-                         to (- corp-z (* to-center (+ (/ card-h 2) 0.1)))]
+                         ;; ends at the server's label (e.g. "HQ"), which sits 0.25 behind
+                         ;; the root card; the extra length covers the lane's end fade
+                         to (- corp-z (* to-center (+ (/ card-h 2) 0.25 0.2)))]
                      {:x (:x run-marker) :from (+ from (* to-center 0.5)) :to to :phase (:phase run)}))]
     {:cards (vec (concat corp-cards runner-cards runner-piles (when run-card [run-card])))
      :labels (vec labels)
