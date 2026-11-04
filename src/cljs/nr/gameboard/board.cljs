@@ -34,7 +34,8 @@
                      render-icons render-message]]
    [nr.ws :as ws]
    [jinteki.card-backs :as card-backs]
-   [reagent.core :as r]))
+   [reagent.core :as r]
+   [shadow.lazy :as lazy]))
 
 (declare stacked-card-view show-distinct-cards)
 
@@ -84,7 +85,7 @@
         cids (into #{} cids)]
     (filterv #(cids (:cid %)) (all-active-cards))))
 
-(defn- image-url
+(defn image-url
   ([card] (image-url card nil))
   ([{:keys [side code] :as card} {:keys [zoom?] :as opts}]
    (let [lang (get-in @app-state [:options :card-language] "en")
@@ -2375,6 +2376,19 @@
         ;; else
         nil))))
 
+;; Experimental three.js board, compiled into the separate :board3d module and
+;; only downloaded when the :board-3d setting is enabled.
+(def board-3d-loadable (lazy/loadable nr.gameboard.board3d/board-3d))
+
+(defn- board-3d-view [me-side]
+  (r/with-let [loaded (r/atom (lazy/ready? board-3d-loadable))
+               mounted (atom true)]
+    (if @loaded
+      [@board-3d-loadable me-side]
+      (do (lazy/load board-3d-loadable #(when @mounted (reset! loaded true)))
+          [:div.board3d-message [tr-span [:game_board-3d-loading "Loading 3D board..."]]]))
+    (finally (reset! mounted false))))
+
 (defn gameboard []
   (let [active (r/cursor app-state [:active-page])
         start-date (r/cursor game-state [:start-date])
@@ -2399,7 +2413,8 @@
         labeled-unrezzed-cards (r/cursor app-state [:options :labeled-unrezzed-cards])
         labeled-cards (r/cursor app-state [:options :labeled-cards])
         card-unplayable-fade-out (r/cursor app-state [:options :card-unplayable-fade-out])
-        card-hover-movement (r/cursor app-state [:options :card-hover-movement])]
+        card-hover-movement (r/cursor app-state [:options :card-hover-movement])
+        board-3d (r/cursor app-state [:options :board-3d])]
 
     (go (while true
           (let [zoom (<! zoom-channel)]
@@ -2523,12 +2538,15 @@
                   [content-pane :log :settings :run-timing :turn-timing])]
 
                [:div.centralpane
-                (if (= op-side :corp)
-                  [board-view-corp me-side op-ident op-deck op-deck-count op-hand op-hand-count op-discard corp-servers run]
-                  [board-view-runner me-side op-ident op-deck op-deck-count op-hand op-hand-count op-discard runner-rig run corp-servers])
-                (if (= me-side :corp)
-                  [board-view-corp me-side me-ident me-deck me-deck-count me-hand me-hand-count me-discard corp-servers run]
-                  [board-view-runner me-side me-ident me-deck me-deck-count me-hand me-hand-count me-discard runner-rig run corp-servers])]
+                (if @board-3d
+                  ^{:key me-side} [board-3d-view me-side]
+                  [:<>
+                   (if (= op-side :corp)
+                     [board-view-corp me-side op-ident op-deck op-deck-count op-hand op-hand-count op-discard corp-servers run]
+                     [board-view-runner me-side op-ident op-deck op-deck-count op-hand op-hand-count op-discard runner-rig run corp-servers])
+                   (if (= me-side :corp)
+                     [board-view-corp me-side me-ident me-deck me-deck-count me-hand me-hand-count me-discard corp-servers run]
+                     [board-view-runner me-side me-ident me-deck me-deck-count me-hand me-hand-count me-discard runner-rig run corp-servers])])]
 
                [:div.leftpane
                 [:div.opponent

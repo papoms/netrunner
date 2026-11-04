@@ -518,7 +518,15 @@
                                :value true
                                :checked (:card-hover-movement @s)
                                :on-change #(swap! s assoc :card-hover-movement (.. % -target -checked))}]
-              [tr-span [:settings_card-hover-movement "Responsive cards in hand"]]]]]]
+              [tr-span [:settings_card-hover-movement "Responsive cards in hand"]]]]]
+           [:br]
+           [tr-element :h4 [:settings_experimental "Experimental"]]
+           [:div
+            [:label [:input {:type "checkbox"
+                             :value true
+                             :checked (:board-3d @s)
+                             :on-change #(swap! s assoc :board-3d (.. % -target -checked))}]
+             [tr-span [:settings_board-3d "3D game board (three.js, experimental)"]]]]]
 
           (let [custom-bg-selected (= (:background @s) "custom-bg" )
                 custom-bg-url (r/cursor s [:custom-bg-url])]
@@ -821,7 +829,7 @@
         state (r/atom
                (-> (:options @app-state)
                    (select-keys [:pronouns :bespoke-sounds :language :card-language :sounds :default-format
-                                 :card-unplayable-fade-out :card-hover-movement
+                                 :card-unplayable-fade-out :card-hover-movement :board-3d
                                  :lobby-sounds :sounds-volume :background :custom-bg-url :card-zoom
                                  :pin-zoom :show-alt-art :card-resolution :pass-on-rez
                                  :auto-select-default-deck-casual :auto-select-default-deck-tournament

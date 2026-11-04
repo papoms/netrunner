@@ -1,0 +1,37 @@
+// Experimental three.js game board (nr.gameboard.board3d)
+
+.gameboard .centralpane
+    .board3d
+        position: relative
+        flex: 1
+        min-height: 300px
+        width: 100%
+        height: 100%
+
+        .board3d-canvas
+            position: absolute
+            top: 0
+            left: 0
+            right: 0
+            bottom: 0
+
+            canvas
+                display: block
+                cursor: pointer
+
+        // zero-size anchor at the click position; the 2D ability menus
+        // position themselves above their parent (bottom: 100%)
+        .board3d-menu
+            position: absolute
+            width: 0
+            height: 0
+            z-index: 30
+
+    .board3d-message
+        margin: 2rem auto
+        padding: 1rem
+        max-width: 30rem
+        color: white
+        background: rgba(0, 0, 0, 0.6)
+        border-radius: 4px
+        text-align: center

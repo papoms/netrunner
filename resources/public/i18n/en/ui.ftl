@@ -543,6 +543,10 @@ game_bad-pub-count-additional = {$base} + {$additional} Bad Publicity
 
 game_beat-trace = Beat Trace
 
+game_board-3d-loading = Loading 3D board...
+
+game_board-3d-unavailable = The 3D board could not be started (WebGL is not available). Disable it in the settings to use the regular board.
+
 game_brain-damage = {NUMBER($dmg)} Core Damage
 
 game_breach-server = Breach server
@@ -1603,6 +1607,8 @@ settings_bg = {$slug ->
 
 settings_block = Block user
 
+settings_board-3d = 3D game board (three.js, experimental)
+
 settings_blocked = Blocked users
 
 settings_cancel = Cancel
@@ -1704,6 +1710,8 @@ settings_email-placeholder = Email address
 settings_email-title = Change email address
 
 settings_enable-game-sounds = Enable game sounds
+
+settings_experimental = Experimental
 
 settings_enable-lobby-sounds = Enable lobby sounds
 

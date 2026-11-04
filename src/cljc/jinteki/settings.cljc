@@ -204,6 +204,11 @@
     :sync? false  ; device-specific
     :validate-fn boolean?
     :doc "Whether cards in hand should be responsive to mouse movement"}
+   {:key :board-3d
+    :default false
+    :sync? false  ; device-specific: depends on the device's WebGL support
+    :validate-fn boolean?
+    :doc "Experimental: render the game board with three.js"}
    {:key :corp-card-sleeve
     :default "nsg-card-back"
     :sync? true
