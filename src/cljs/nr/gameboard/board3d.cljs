@@ -572,8 +572,18 @@
           (let [dir (.-pushDir ud)
                 pulse (js/Math.pow (max 0 (js/Math.sin (* now 3.2))) 6)
                 push (* dir run-card-push pulse)
-                ^js shadow (.-shadow ud)]
+                ^js shadow (.-shadow ud)
+                ;; a wandering "virtual pointer" (overlapping sines, so it looks
+                ;; random but moves smoothly) tilts the card and sweeps the holo
+                ;; shine across it; a real hover takes over
+                au (+ 0.5 (* 0.25 (js/Math.sin (* now 0.83))) (* 0.15 (js/Math.sin (+ (* now 1.97) 1.3))))
+                av (+ 0.5 (* 0.25 (js/Math.sin (+ (* now 0.67) 2.1))) (* 0.15 (js/Math.sin (+ (* now 1.61) 0.4))))
+                [tx tz th] (if hovered
+                             [tx tz th]
+                             [(* (- av 0.5) 2 hover-tilt 0.6) (* (- au 0.5) 2 hover-tilt 0.6) 0.8])]
             (vreset! moving true)
+            (when-not hovered
+              (.set (.. uniforms -uPointer -value) au av))
             (set! (.-x tr) (+ tx (* dir (+ run-card-lean (* 0.12 pulse)))))
             (set! (.-z tr) (+ tz (* 0.04 (js/Math.sin (* now 1.1)))))
             (.set (.-position tilt) 0 (+ ty (* 0.025 (js/Math.sin (* now 1.7)))) push)
