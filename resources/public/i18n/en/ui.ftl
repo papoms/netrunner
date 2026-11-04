@@ -1661,6 +1661,8 @@ settings_card-preview-zoom = Card preview zoom
 
 settings_card-text = Card Text
 
+settings_card-zoom-holo = Holo effect on zoomed cards (tilts and shines as you move over a card)
+
 settings_change-avatar = Change on gravatar.com
 
 settings_change-email = Change email

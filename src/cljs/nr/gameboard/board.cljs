@@ -20,7 +20,9 @@
    [nr.gameboard.actions :refer [send-command]]
    [nr.gameboard.card-preview :refer [card-highlight-mouse-out
                                       card-highlight-mouse-over card-preview-mouse-out
-                                      card-preview-mouse-over put-game-card-in-channel zoom-channel]]
+                                      card-preview-mouse-over clear-zoom-pointer!
+                                      put-game-card-in-channel track-zoom-pointer! zoom-channel]]
+   [nr.gameboard.holo :refer [holo-card]]
    [nr.gameboard.log :as game-log :refer [find-matches reset-completions]]
    [nr.gameboard.player-stats :refer [stat-controls stats-view]]
    [nr.gameboard.replay :refer [replay-panel]]
@@ -410,15 +412,19 @@
 (defn card-zoom-display
   [zoom-card img-side]
   (r/with-let [pin (r/cursor app-state [:options :pin-zoom])
-               card-zoom-type (r/cursor app-state [:options :card-zoom])]
+               card-zoom-type (r/cursor app-state [:options :card-zoom])
+               holo (r/cursor app-state [:options :card-zoom-holo])]
     (when-let [card @zoom-card]
       [:<>
        [:div.card-preview.blue-shade
-        {:on-click #(reset! img-side (not @img-side))}
+        {:class (when @holo "holo")
+         :on-click #(reset! img-side (not @img-side))}
         (let [url (image-url card {:zoom? true})
               show-img (= "image" (or @card-zoom-type "image"))]
           (if (and url (if show-img @img-side (not @img-side)))
-            [:img {:src url :alt (get-title card) :onLoad #(-> % .-target js/$ .show)}]
+            (if @holo
+              [holo-card url (get-title card)]
+              [:img {:src url :alt (get-title card) :onLoad #(-> % .-target js/$ .show)}])
             [card-as-text card false]))]
        (when (or @pin false)
          [:button.win-right {:on-click #(reset! zoom-card false)
@@ -781,7 +787,9 @@
                                                        (spectator-view-hidden?)
                                                        (= @gs-side (keyword (lower-case side))))
                                                (put-game-card-in-channel card zoom-channel))
-                            :on-mouse-leave #(put! zoom-channel false)
+                            :on-mouse-move track-zoom-pointer!
+                            :on-mouse-leave #(do (put! zoom-channel false)
+                                                 (clear-zoom-pointer!))
                             :on-click #(when (not disable-click)
                                          (handle-card-click card (.-shiftKey %)))
                             :on-key-down #(when (and (= "Enter" (.-key %))

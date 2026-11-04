@@ -194,6 +194,11 @@
     :sync? true
     :validate-fn #(contains? valid-card-zoom-options %)
     :doc "How to display zoomed cards (image/text)"}
+   {:key :card-zoom-holo
+    :default false
+    :sync? false  ; device-specific: visual effect
+    :validate-fn boolean?
+    :doc "Tilt and holo shine on the zoomed card, following the pointer on the hovered card"}
    {:key :card-unplayable-fade-out
     :default true
     :sync? false  ; device-specific
