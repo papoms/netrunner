@@ -45,6 +45,7 @@
 ;; the thickness is exaggerated a little so the edge is visible)
 (def card-radius 0.032)
 (def card-thickness 0.006)
+(def highlight-ring 0.022)   ; width of the highlight border around a card
 (def card-edge-color "#c9c6bf")  ; the paper core seen on the edge
 (def pile-edge-color "#8d8a84")
 
@@ -246,6 +247,16 @@
             :pos [x 0 z] :rot 0 :label label}]
     top-card (conj (card-entry top-card :pile [x (+ 0.002 (* 0.003 (min cnt 40))) z] 0))))
 
+(defn- hand-entries
+  "Entries for the cards in my hand, in hand order."
+  [me]
+  (let [hand (get-in @game-state [me :hand])
+        n (count hand)]
+    (vec (map-indexed (fn [i card]
+                        (assoc (card-entry card :hand [0 0 0] 0)
+                               :hand true :hand-index i :hand-count n))
+                      hand))))
+
 (defn- layout
   "Returns {:cards [...] :labels [...] :run-marker ...} for the current game state."
   [me]
@@ -396,7 +407,12 @@
 
 ;; shared by all cards
 (def ^:private card-face-geometry (delay (rounded-geometry card-w card-h card-radius)))
-(def ^:private card-glow-geometry (delay (rounded-geometry (+ card-w 0.08) (+ card-h 0.08) (+ card-radius 0.04))))
+(def ^:private card-glow-geometry
+  ;; a thin rounded ring around the card: the highlight border
+  (delay (let [m highlight-ring
+               ^js outer (rounded-shape (+ card-w (* 2 m)) (+ card-h (* 2 m)) (+ card-radius m))]
+           (.push (.-holes outer) (rounded-shape card-w card-h card-radius))
+           (THREE/ShapeGeometry. outer 8))))
 (def ^:private card-body-geometry
   ;; the card's edge: the rounded outline extruded 1 unit up (y 0..1), scaled to the thickness
   (delay (doto (THREE/ExtrudeGeometry. (rounded-shape card-w card-h card-radius)
@@ -549,6 +565,20 @@
   {"encounter-ice" "#ff4d4d"
    "approach-ice" "#ffcc00"})
 
+;; my hand (grip / HQ) fans out along the bottom of the view, like in a card
+;; game client: half of each card shows; a hovered card rises until its bottom
+;; edge meets the canvas's bottom edge
+(def hand-distance 1.6)    ; from the camera
+(def hand-card-height 0.36) ; share of the view's height
+(def hand-hover-scale 1.2)
+(def hand-max-angle 0.07)   ; radians between neighbours
+(def hand-max-spread 0.75)  ; share of the view's width the fan may use
+(def hand-speed 0.25)
+(def hand-full-size-cards 6) ; more cards than this shrink the hand...
+(def hand-min-scale 0.6)     ; ...down to this
+(def hand-angle-jitter 0.035) ; radians: cards held by hand never line up exactly
+(def hand-depth-step 0.01)   ; camera-space gap between overlapping cards (room for their shadows)
+
 (def hover-tilt 0.2)   ; radians at the card's edge
 (def hover-lift 0.12)  ; how far a hovered card rises off the table
 
@@ -582,6 +612,11 @@
         ;; slides away from it, the hover drops, the card falls flat, ...) and
         ;; makes it flip back and forth. It still follows a standing ice's pose.
         ^js hit (card-plane card-face-geometry @hit-material)
+        ;; in the hand: a small shadow cast onto the card behind, so overlapping
+        ;; cards read as separate
+        ^js drop (plane (* 1.25 card-w) (* 1.15 card-h)
+                        (THREE/MeshBasicMaterial. #js {:map (shadow-texture) :transparent true
+                                                       :opacity 0.95 :depthWrite false}))
         ;; soft shadow on the table; it stays down there when the card lifts or floats
         ^js shadow (plane (* 1.2 card-w) (* 1.2 card-h)
                           (THREE/MeshBasicMaterial. #js {:map (shadow-texture) :transparent true
@@ -594,6 +629,10 @@
       (.add tilt m))
     (.add pose tilt)
     (.add pose hit)
+    ;; just behind the card, offset left and down
+    (.set (.-position drop) -0.07 -0.001 0.04)
+    (set! (.-visible drop) false)
+    (.add pose drop)
     (.add group pose)
     (.add group shadow)
     (doto (.-userData group)
@@ -606,7 +645,8 @@
       (aset "front" front)
       (aset "glow" glow)
       (aset "overlay" overlay)
-      (aset "hit" hit))
+      (aset "hit" hit)
+      (aset "drop" drop))
     (set! (.. hit -userData -card-group) group) ; for raycast hits
     group))
 
@@ -617,10 +657,12 @@
   (set! (.. ud -front -position -y) (+ h 0.0003))
   (set! (.. ud -overlay -position -y) (+ h 0.0008))
   (set! (.. ud -hit -position -y) (+ h 0.0003))
-  ;; the glow pokes out around the slab, just above the table
-  (set! (.. ud -glow -position -y) 0.0005))
+  ;; the highlight ring lies around the card's face, at its height: it shows on
+  ;; top of cards below (e.g. the one behind in the hand) and is covered by
+  ;; cards above, like a real border would be
+  (set! (.. ud -glow -position -y) (+ h 0.0002)))
 
-(defn- update-card-object! [^js group {:keys [url highlight badges strength pile count pos rot float push-dir under-attack ice-pose pose-dir card side] :as entry}]
+(defn- update-card-object! [^js group {:keys [url highlight badges strength pile count pos rot float push-dir under-attack ice-pose pose-dir card side hand-index hand-count] :as entry}]
   (let [^js ud (.-userData group)
         ^js front (.-front ud)
         ^js glow (.-glow ud)
@@ -635,6 +677,9 @@
     (when (nil? (.-seed ud))
       (set! (.-seed ud) (* 100 (js/Math.random))))
     (set! (.-pushDir ud) (or push-dir 0))
+    (set! (.-handIndex ud) (or hand-index 0))
+    (set! (.. ud -drop -visible) (boolean hand-index))
+    (set! (.-handCount ud) (or hand-count 1))
     (set! (.-icePose ud) (some-> ice-pose name))
     (when pose-dir (set! (.-poseDir ud) pose-dir))
     ;; the shadow lies on the table, offset a little as if lit from above the
@@ -676,23 +721,40 @@
   (let [owner (card-side-kw card)]
     (if (= owner me) #js [0 0.6 5.5] #js [0 0.6 -5.5])))
 
-(defn- sync-cards! [{:keys [^js scene ^js objects]} entries me]
+(declare face-camera-q)
+
+(defn- sync-cards!
+  "Cards on the table are children of the scene; cards in my hand children of
+  the camera (laid out in camera space by hand-pose!). A card changing between
+  the two is re-attached keeping its place in the world, so it flies over."
+  [{:keys [^js scene ^js camera ^js objects]} entries me]
   (let [seen (js/Set.)]
-    (doseq [{:keys [id] :as entry} entries
+    (doseq [{:keys [id hand] :as entry} entries
             :when id]
       (.add seen id)
-      (let [^js obj (or (.get objects id)
-                    (let [^js o (make-card-object entry)
-                          [sx sy sz] (if (:pile entry) (:pos entry) (spawn-position entry me))]
-                      (.set (.-position o) sx sy sz)
-                      (set! (.. o -rotation -y) (:rot entry))
-                      (.add scene o)
+      (let [^js parent (if hand camera scene)
+            ^js obj (or (.get objects id)
+                    (let [^js o (make-card-object entry)]
+                      (cond
+                        ;; drawn: rises from below the view
+                        hand (do (.set (.-position o) 0 -1.5 (- hand-distance))
+                                 (.copy (.-quaternion o) face-camera-q))
+                        (:pile entry) (let [[x y z] (:pos entry)] (.set (.-position o) x y z))
+                        :else (let [[sx sy sz] (spawn-position entry me)] (.set (.-position o) sx sy sz)))
+                      (when-not hand (set! (.. o -rotation -y) (:rot entry)))
+                      (.add parent o)
                       (.set objects id o)
-                      o))]
+                      o))
+            ^js ud (.-userData obj)]
+        (when-not (identical? (.-parent obj) parent)
+          (.attach parent obj)
+          ;; landing on the table: fly-card! turns it flat on the way
+          (when-not hand (set! (.-flying ud) true)))
+        (set! (.-inHand ud) (boolean hand))
         (update-card-object! obj entry)))
     (doseq [[id ^js obj] (es6-iterator-seq (.entries objects))]
       (when-not (.has seen id)
-        (.remove scene obj)
+        (.removeFromParent obj)
         (.delete objects id)))))
 
 (defn- sync-labels! [{:keys [^js scene ^js labels]} label-entries pile-entries]
@@ -1066,8 +1128,10 @@
   (let [{:keys [cards labels run-marker run-lane]} (layout me)
         tokens (token-layout me cards)
         ;; chips count for the camera's framing too
-        bounds (card-bounds (concat cards (map #(update % :pos (fn [[x _ z]] [x 0 z])) tokens)))]
-    (sync-cards! ctx cards me)
+        bounds (some-> (card-bounds (concat cards (map #(update % :pos (fn [[x _ z]] [x 0 z])) tokens)))
+                       ;; leave room at the bottom (my side, +z) for the hand
+                       (update 3 + (if (seq (get-in @game-state [me :hand])) 1.3 0)))]
+    (sync-cards! ctx (into cards (hand-entries me)) me)
     (sync-labels! ctx labels (filter :pile cards))
     (sync-run-marker! ctx run-marker)
     (sync-run-lane! ctx run-lane)
@@ -1189,6 +1253,7 @@
         ;; landed
         (do (.copy p inspect-v)
             (.set (.-rotation obj) 0 (aget t 3) 0)
+            (.set (.-scale obj) 1 1 1)
             (set! (.-flying ud) false)
             (set! (.. ud -shadow -visible) true)
             false)
@@ -1200,7 +1265,69 @@
               (set! (.-y inspect-v) (+ (.-y inspect-v) (* inspect-arc (min 1 dist)))))
             (.lerp p inspect-v inspect-speed)
             (.slerp q inspect-q inspect-speed)
+            ;; cards coming from the hand are scaled down there
+            (let [^js sv (.-scale obj)
+                  k (+ (.-x sv) (* inspect-speed (- 1 (.-x sv))))]
+              (.set sv k k k))
             true)))))
+
+(def ^:private hand-v (THREE/Vector3.))
+(def ^:private hand-q (THREE/Quaternion.))
+(def ^:private hand-zq (THREE/Quaternion.))
+(def ^:private z-unit (THREE/Vector3. 0 0 1))
+
+(defn- hand-frame
+  "Where the hand goes this frame, in camera space: the visible view's bottom
+  centre, its width and height at hand-distance (the view may be offset, so
+  this unprojects instead of assuming the camera's axis)."
+  [^js camera]
+  (let [at (fn [nx ny]
+             (let [^js v (.applyMatrix4 (THREE/Vector3. nx ny 0.5) (.-projectionMatrixInverse camera))]
+               (.multiplyScalar v (/ hand-distance (- (.-z v))))))
+        ^js bottom (at 0 -1)
+        ^js top (at 0 1)
+        ^js right (at 1 -1)
+        ^js left (at -1 -1)]
+    {:x (.-x bottom) :y (.-y bottom)
+     :w (- (.-x right) (.-x left))
+     :h (- (.-y top) (.-y bottom))}))
+
+(defn- hand-pose!
+  "Glides a hand card to its place in the fan, or (hovered) straight up so it
+  shows in full. Returns true while moving."
+  [^js obj {:keys [x y w h]} hovered]
+  (let [^js ud (.-userData obj)
+        n (.-handCount ud)
+        i (.-handIndex ud)
+        s (* (/ (* hand-card-height h) card-h)       ; card scale
+             (max hand-min-scale (min 1 (/ hand-full-size-cards (max 1 n)))))
+        cw (* s card-w)
+        ;; a bigger hand is held tighter: more overlap per card
+        overlap (+ 0.32 (* 0.3 (max 0 (min 1 (/ (- 12 n) 7)))))  ; 0.62 up to 5 cards, 0.32 from 12
+        spacing (min (* overlap cw) (/ (- (* hand-max-spread w) cw) (max 1 (dec n))))
+        step (min hand-max-angle (/ 0.6 (max 1 n)))
+        off (- i (/ (dec n) 2))
+        ;; stable per card (seed), so a card keeps its little tilt
+        jitter (* hand-angle-jitter (- (mod (* 7.31 (or (.-seed ud) 0)) 1) 0.5))
+        a (+ (* off step) jitter)
+        ;; the fan's arc: cards further out sit a little lower
+        r (/ spacing (max step 0.001))
+        [tx ty tz rot sc]
+        (if hovered
+          [(+ x (* off spacing)) (+ y (/ (* s hand-hover-scale card-h) 2)) (+ (- hand-distance) (* n hand-depth-step) 0.05) 0 (* s hand-hover-scale)]
+          [(+ x (* off spacing)) (- y (* r (- 1 (js/Math.cos (* off step))))) (+ (- hand-distance) (* i hand-depth-step)) (- a) s])
+        ^js p (.-position obj)
+        ^js q (.-quaternion obj)
+        ^js sv (.-scale obj)]
+    (.set hand-v tx ty tz)
+    (.multiplyQuaternions hand-q (.setFromAxisAngle hand-zq z-unit rot) face-camera-q)
+    (set! (.. ud -shadow -visible) false)
+    (if (and (< (.distanceTo p hand-v) 0.0005) (< (.angleTo q hand-q) 0.001) (< (js/Math.abs (- (.-x sv) sc)) 0.0005))
+      false
+      (do (.lerp p hand-v hand-speed)
+          (.slerp q hand-q hand-speed)
+          (let [k (+ (.-x sv) (* hand-speed (- sc (.-x sv))))] (.set sv k k k))
+          true))))
 
 (defn- lerp-objects!
   "Glides every card towards its target position, and the hovered card towards
@@ -1209,12 +1336,20 @@
   (let [moving (volatile! false)
         now (/ (js/performance.now) 1000) ; seconds, for the run card's animation
         {hover-id :id [hu hv] :uv} @hover
-        inspect-id @inspect]
+        inspect-id @inspect
+        hand (hand-frame camera)]
     (doseq [[id ^js obj] (es6-iterator-seq (.entries objects))]
-      (if (and (.. obj -userData -target)
-               (or (= id inspect-id) (.. obj -userData -flying)))
+      (cond
+        (.. obj -userData -inHand)
+        (when (hand-pose! obj hand (= id hover-id))
+          (vreset! moving true))
+
+        (and (.. obj -userData -target)
+             (or (= id inspect-id) (.. obj -userData -flying)))
         (when (fly-card! obj (= id inspect-id) camera)
           (vreset! moving true))
+
+        :else
       (when-let [t (.. obj -userData -target)]
         (let [^js p (.-position obj)
               ^js r (.-rotation obj)
@@ -1371,6 +1506,8 @@
       (set! (.. table-group -position -y) (- -0.006 (/ mat-thickness 2)))
       (set! (.. table-group -rotation -y) (if (= me :runner) (- (/ js/Math.PI 2)) (/ js/Math.PI 2)))
       (.add scene table-group)
+      ;; the hand's cards are children of the camera, so it must be in the scene
+      (.add scene camera)
       (let [^js edges (THREE/LineSegments. (THREE/EdgesGeometry. (.-geometry run-marker))
                                            (THREE/LineBasicMaterial. #js {:color "#ff4d4d" :transparent true :opacity 0.9}))]
         (.add run-marker edges)
@@ -1650,6 +1787,8 @@
              (.addEventListener canvas "pointerup" on-pointer-up)
              (.addEventListener canvas "pointermove" on-pointer-move)
              (.addEventListener canvas "pointerleave" on-pointer-leave)
+             ;; also when the pointer moves straight onto an overlapping panel
+             (.addEventListener canvas "pointerout" on-pointer-leave)
              (.addEventListener js/window "keydown" on-key-down)
              (.addEventListener js/window "keyup" on-key-up)
              (.addEventListener js/window "blur" on-blur)
