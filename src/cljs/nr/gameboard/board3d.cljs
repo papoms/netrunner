@@ -19,6 +19,7 @@
    [nr.gameboard.board :as board]
    [nr.gameboard.card-preview :refer [clear-zoom-pointer! put-game-card-in-channel
                                       set-zoom-pointer! zoom-channel]]
+   [nr.appstate :refer [app-state]]
    [nr.gameboard.state :refer [game-state]]
    [reagent.core :as r]))
 
@@ -771,16 +772,21 @@
           scene (THREE/Scene.)
           camera (THREE/PerspectiveCamera. 45 1 0.1 100)
           controls (OrbitControls. camera (.-domElement renderer))
-          table (plane 13 9.5 (THREE/MeshBasicMaterial. #js {:color "#0b0f14" :transparent true :opacity 0.55}))
+          ;; the table (plain, or a playmat image) lies in a group turned 90 degrees
+          ;; so that the mat's left half (the Corp's) faces the Corp's side
+          ^js table-group (THREE/Group.)
+          table (plane 1 1 (THREE/MeshBasicMaterial. #js {:color "#0b0f14" :transparent true :opacity 0.55}))
           grid (THREE/GridHelper. 13 26 "#24303c" "#18202a")
           run-marker (THREE/Mesh. (THREE/ConeGeometry. 0.22 0.45 4)
                                   (THREE/MeshBasicMaterial. #js {:color "#ff4d4d"}))
           run-lane (plane 1 1 (lane-material))]
       (.setPixelRatio renderer (min 2 (.-devicePixelRatio js/window)))
       (.appendChild container (.-domElement renderer))
-      (set! (.. table -position -y) -0.01)
+      (.add table-group table)
+      (set! (.. table-group -position -y) -0.01)
+      (set! (.. table-group -rotation -y) (if (= me :runner) (- (/ js/Math.PI 2)) (/ js/Math.PI 2)))
+      (.add scene table-group)
       (set! (.. grid -position -y) -0.005)
-      (.add scene table)
       (.add scene grid)
       (set! (.. run-marker -rotation -x) js/Math.PI)
       (set! (.-visible run-marker) false)
@@ -795,12 +801,44 @@
         (.addEventListener controls "start" #(swap! view assoc :user-moved true))
         {:renderer renderer :scene scene :camera camera :controls controls
          :objects (js/Map.) :labels (js/Map.) :run-marker run-marker :run-lane run-lane
+         :table table :grid grid
+         ;; playmat URL currently shown (nil until the first frame applies the setting)
+         :playmat (atom nil)
          :raycaster (THREE/Raycaster.) :view view
          ;; {:id card-id :uv [u v]} of the card under the pointer
          :hover (atom nil)}))
     (catch :default e
       (js/console.warn "3D board: could not create WebGL renderer" e)
       nil)))
+
+(def table-depth 10) ; along z: covers both players' areas
+
+(defn- apply-playmat!
+  "Shows the playmat image `url` on the table, or the plain dark table when blank.
+  The mat's left half (Corp) faces the Corp: see the table group's rotation."
+  [{:keys [^js table ^js grid]} url]
+  (let [^js mat (.-material table)]
+    (if (str/blank? url)
+      (do (set! (.-map mat) nil)
+          (.set (.-color mat) "#0b0f14")
+          (set! (.-opacity mat) 0.55)
+          (set! (.-visible grid) true)
+          ;; plane x runs along the board's depth, plane y across it
+          (.set (.-scale table) 9.5 13 1))
+      (let [^js t (.load texture-loader url
+                         (fn [^js tex]
+                           ;; keep the image's proportions: its width spans the board's depth
+                           (let [^js img (.-image tex)]
+                             (.set (.-scale table) table-depth (* table-depth (/ (.-height img) (.-width img))) 1)
+                             (reset! redraw-requested true))))]
+        (set! (.-colorSpace t) THREE/SRGBColorSpace)
+        (set! (.-map mat) t)
+        ;; slightly dimmed so the cards stand out
+        (.set (.-color mat) "#b8b8b8")
+        (set! (.-opacity mat) 1)
+        (set! (.-visible grid) false)))
+    (set! (.-needsUpdate mat) true)
+    (reset! redraw-requested true)))
 
 (def camera-elevation (* 58 (/ js/Math.PI 180)))
 
@@ -939,6 +977,10 @@
                            (clear-zoom-pointer!))
         animate (fn animate []
                   (when-let [c @ctx]
+                    (let [url (get-in @app-state [:options :board-3d-playmat] "")]
+                      (when (not= url @(:playmat c))
+                        (reset! (:playmat c) url)
+                        (apply-playmat! c url)))
                     (let [synced (when @dirty
                                    (reset! dirty false)
                                    (sync-scene! c me)

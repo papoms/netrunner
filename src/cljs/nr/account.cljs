@@ -526,7 +526,13 @@
                              :value true
                              :checked (:board-3d @s)
                              :on-change #(swap! s assoc :board-3d (.. % -target -checked))}]
-             [tr-span [:settings_board-3d "3D game board (three.js, experimental)"]]]]]
+             [tr-span [:settings_board-3d "3D game board (three.js, experimental)"]]]
+            [:div
+             [tr-span [:settings_board-3d-playmat "Playmat image for the 3D board (URL, Corp half on the left, Runner half on the right; empty for the plain table)"]]
+             [:div [:input {:type "text"
+                            :placeholder "/img/playmats/..."
+                            :on-change #(swap! s assoc :board-3d-playmat (.. % -target -value))
+                            :value (or (:board-3d-playmat @s) "")}]]]]]
 
           (let [custom-bg-selected (= (:background @s) "custom-bg" )
                 custom-bg-url (r/cursor s [:custom-bg-url])]
@@ -836,7 +842,7 @@
         state (r/atom
                (-> (:options @app-state)
                    (select-keys [:pronouns :bespoke-sounds :language :card-language :sounds :default-format
-                                 :card-unplayable-fade-out :card-hover-movement :board-3d
+                                 :card-unplayable-fade-out :card-hover-movement :board-3d :board-3d-playmat
                                  :lobby-sounds :sounds-volume :background :custom-bg-url :card-zoom
                                  :pin-zoom :card-zoom-holo :show-alt-art :card-resolution :pass-on-rez
                                  :auto-select-default-deck-casual :auto-select-default-deck-tournament

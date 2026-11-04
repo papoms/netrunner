@@ -214,6 +214,11 @@
     :sync? false  ; device-specific: depends on the device's WebGL support
     :validate-fn boolean?
     :doc "Experimental: render the game board with three.js"}
+   {:key :board-3d-playmat
+    :default ""
+    :sync? false  ; device-specific, like :board-3d
+    :validate-fn string?
+    :doc "Image URL of a playmat for the 3D board (Corp half on the left, Runner half on the right); empty for the plain table"}
    {:key :corp-card-sleeve
     :default "nsg-card-back"
     :sync? true
