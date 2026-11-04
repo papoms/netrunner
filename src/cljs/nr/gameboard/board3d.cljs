@@ -291,9 +291,79 @@
     (set! (.. m -rotation -x) (- (/ js/Math.PI 2)))
     m))
 
+;;; Card front shader: the card texture, plus a holo effect while hovered
+;;; (same recipe as the CSS effect on the zoomed card in nr.gameboard.holo:
+;;; an overlay glare and a color-dodge rainbow band around the pointer).
+
+(def ^:private card-vertex-shader
+  "varying vec2 vUv;
+   void main() {
+     vUv = uv;
+     gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+   }")
+
+(def ^:private card-fragment-shader
+  "uniform sampler2D map;
+   uniform vec2 uPointer;  // pointer on the card, uv space (0..1, v up)
+   uniform float uHolo;    // effect strength 0..1
+   varying vec2 vUv;
+
+   vec3 rainbowColor(int i) {
+     if (i == 0) return vec3(1.0, 0.46, 0.46);
+     if (i == 1) return vec3(1.0, 0.90, 0.38);
+     if (i == 2) return vec3(0.58, 1.0, 0.38);
+     if (i == 3) return vec3(0.52, 1.0, 0.92);
+     if (i == 4) return vec3(0.48, 0.53, 1.0);
+     return vec3(0.74, 0.46, 1.0);
+   }
+
+   vec3 rainbow(float t) {
+     float f = fract(t) * 6.0;
+     int i = int(floor(f));
+     return mix(rainbowColor(i), rainbowColor(int(mod(float(i + 1), 6.0))), fract(f));
+   }
+
+   vec3 overlay(vec3 base, vec3 blend) {
+     return mix(2.0 * base * blend, 1.0 - 2.0 * (1.0 - base) * (1.0 - blend), step(0.5, base));
+   }
+
+   void main() {
+     vec4 tex = texture2D(map, vUv);
+     vec3 col = tex.rgb;
+     if (uHolo > 0.001) {
+       float d = distance(vUv, uPointer);
+       // foil: diagonal rainbow bands that shift as the pointer moves
+       float t = dot(vUv - 0.5, vec2(-0.34, 0.94)) * 2.5 + (uPointer.x + uPointer.y) * 0.6;
+       vec3 foil = rainbow(t);
+       vec3 dodge = min(col / max(1.0 - foil * 0.55, 0.001), vec3(1.0));
+       float spot = 1.0 - smoothstep(0.0, 0.85, d);
+       col = mix(col, dodge, uHolo * 0.4 * spot);
+       // glare: brightens around the pointer, slightly darkens far away
+       float glare = 1.0 - smoothstep(0.0, 0.6, d);
+       col = mix(col, overlay(col, vec3(mix(0.4, 0.95, glare))), uHolo * 0.6);
+     }
+     gl_FragColor = vec4(col, tex.a);
+     #include <colorspace_fragment>
+   }")
+
+(defn- card-front-material []
+  (THREE/ShaderMaterial.
+    #js {:uniforms #js {:map #js {:value nil}
+                        :uPointer #js {:value (THREE/Vector2. 0.5 0.5)}
+                        :uHolo #js {:value 0}}
+         :vertexShader card-vertex-shader
+         :fragmentShader card-fragment-shader
+         :transparent true}))
+
+(def hover-tilt 0.2)   ; radians at the card's edge
+(def hover-lift 0.12)  ; how far a hovered card rises off the table
+
 (defn- make-card-object [{:keys [pile]}]
   (let [^js group (THREE/Group.)
-        ^js front (plane card-w card-h (THREE/MeshBasicMaterial. #js {:transparent true}))
+        ;; the hovered card tilts inside its group, so the group's own
+        ;; rotation (e.g. sideways ice) stays untouched
+        ^js tilt (THREE/Group.)
+        ^js front (plane card-w card-h (card-front-material))
         ^js glow (plane (+ card-w 0.08) (+ card-h 0.08)
                     (THREE/MeshBasicMaterial. #js {:color "#ffffff" :transparent true :opacity 0.85}))
         ^js overlay (plane card-w card-h (THREE/MeshBasicMaterial. #js {:transparent true :depthWrite false}))]
@@ -301,15 +371,18 @@
     (set! (.. overlay -position -y) 0.001)
     (set! (.-visible glow) false)
     (set! (.-visible overlay) false)
-    (.add group glow)
-    (.add group front)
-    (.add group overlay)
+    (.add tilt glow)
+    (.add tilt front)
+    (.add tilt overlay)
+    (.add group tilt)
     (when pile
       (let [^js box (THREE/Mesh. (THREE/BoxGeometry. card-w 1 card-h)
                              (THREE/MeshBasicMaterial. #js {:color "#1b1b1f"}))]
-        (.add group box)
+        (.add tilt box)
         (set! (.. group -userData -box) box)))
+    (set! (.. group -userData -tilt) tilt)
     (set! (.. group -userData -front) front)
+    (set! (.. front -userData -card-group) group) ; for raycast hits
     (set! (.. group -userData -glow) glow)
     (set! (.. group -userData -overlay) overlay)
     group))
@@ -323,8 +396,7 @@
     (set! (.-entry ud) entry)
     (when (not= url (.-url ud))
       (set! (.-url ud) url)
-      (set! (.. front -material -map) (texture url))
-      (set! (.. front -material -needsUpdate) true))
+      (set! (.. front -material -uniforms -map -value) (texture url)))
     (if-let [color (get highlight-colors highlight)]
       (do (.set (.. glow -material -color) color)
           (set! (.-visible glow) true))
@@ -421,10 +493,12 @@
     (+ v (* lerp-factor (- target v)))))
 
 (defn- lerp-objects!
-  "Glides every card towards its target position. Returns true while anything is still moving."
-  [{:keys [objects ^js run-marker]}]
-  (let [moving (volatile! false)]
-    (doseq [^js obj (es6-iterator-seq (.values objects))]
+  "Glides every card towards its target position, and the hovered card towards
+  its tilt and holo state. Returns true while anything is still moving."
+  [{:keys [objects ^js run-marker hover]}]
+  (let [moving (volatile! false)
+        {hover-id :id [hu hv] :uv} @hover]
+    (doseq [[id ^js obj] (es6-iterator-seq (.entries objects))]
       (when-let [t (.. obj -userData -target)]
         (let [^js p (.-position obj)
               ^js r (.-rotation obj)
@@ -435,7 +509,35 @@
           (when (or (not= x (.-x p)) (not= y (.-y p)) (not= z (.-z p)) (not= ry (.-y r)))
             (vreset! moving true)
             (.set p x y z)
-            (set! (.-y r) ry)))))
+            (set! (.-y r) ry))))
+      ;; hover: the side under the pointer comes up towards the viewer, and the
+      ;; holo shine follows the pointer (uv: u right, v up; the card's top is -z)
+      (let [^js ud (.-userData obj)
+            ^js tilt (.-tilt ud)
+            ^js uniforms (.. ud -front -material -uniforms)
+            hovered (and hover-id (= id hover-id) (not (.-box ud)))
+            [tx tz ty th] (if hovered
+                            [(* (- hv 0.5) 2 hover-tilt) (* (- hu 0.5) 2 hover-tilt) hover-lift 1]
+                            [0 0 0 0])
+            ^js tr (.-rotation tilt)
+            rx (approach (.-x tr) tx)
+            rz (approach (.-z tr) tz)
+            ly (approach (.. tilt -position -y) ty)
+            holo (approach (.. uniforms -uHolo -value) th)]
+        (when (or (not= rx (.-x tr)) (not= rz (.-z tr)) (not= ly (.. tilt -position -y))
+                  (not= holo (.. uniforms -uHolo -value)))
+          (vreset! moving true)
+          (set! (.-x tr) rx)
+          (set! (.-z tr) rz)
+          (set! (.. tilt -position -y) ly)
+          (set! (.. uniforms -uHolo -value) holo))
+        (when hovered
+          (let [^js ptr (.. uniforms -uPointer -value)
+                px (approach (.-x ptr) hu)
+                py (approach (.-y ptr) hv)]
+            (when (or (not= px (.-x ptr)) (not= py (.-y ptr)))
+              (vreset! moving true)
+              (.set ptr px py))))))
     (when (.-visible run-marker)
       (when-let [t (.. run-marker -userData -target)]
         (let [^js p (.-position run-marker)]
@@ -456,7 +558,7 @@
                              (.. obj -userData -front)))]
     (.setFromCamera raycaster ndc camera)
     (when-let [^js hit (first (.intersectObjects raycaster fronts false))]
-      (let [entry (.. hit -object -parent -userData -entry)
+      (let [entry (.. hit -object -userData -card-group -userData -entry)
             ^js uv (.-uv hit)]
         (when (:card entry)
           (assoc entry :uv (when uv [(.-x uv) (.-y uv)])))))))
@@ -493,7 +595,9 @@
         (.addEventListener controls "start" #(swap! view assoc :user-moved true))
         {:renderer renderer :scene scene :camera camera :controls controls
          :objects (js/Map.) :labels (js/Map.) :run-marker run-marker
-         :raycaster (THREE/Raycaster.) :view view}))
+         :raycaster (THREE/Raycaster.) :view view
+         ;; {:id card-id :uv [u v]} of the card under the pointer
+         :hover (atom nil)}))
     (catch :default e
       (js/console.warn "3D board: could not create WebGL renderer" e)
       nil)))
@@ -622,12 +726,15 @@
               (if zoomable
                 (put-game-card-in-channel card zoom-channel)
                 (put! zoom-channel false)))
+            ;; tilt and shine of the hovered card on the board
+            (reset! (:hover @ctx) (when (and card uv) {:id id :uv uv}))
             ;; drives the holo effect on the zoomed card (UV v points up, screen y down)
             (if (and zoomable uv)
               (set-zoom-pointer! (first uv) (- 1 (second uv)))
               (clear-zoom-pointer!))))
         on-pointer-leave (fn [_]
                            (reset! hovered nil)
+                           (some-> @ctx :hover (reset! nil))
                            (put! zoom-channel false)
                            (clear-zoom-pointer!))
         animate (fn animate []
