@@ -451,7 +451,12 @@
        col += cyan * soft(length(f - c), 0.08) * twinkle * 0.35;
      }
 
-     gl_FragColor = vec4(col * endFade, 1.0);
+     // opacity = brightness: empty parts of the lane are fully transparent, so the
+     // board's background shows through (additive blending would make the
+     // transparent canvas opaque black there)
+     col *= endFade;
+     float a = clamp(max(max(col.r, col.g), col.b), 0.0, 1.0);
+     gl_FragColor = vec4(col / max(a, 0.001), a);
      #include <colorspace_fragment>
    }")
 
@@ -463,8 +468,7 @@
          :vertexShader card-vertex-shader
          :fragmentShader lane-fragment-shader
          :transparent true
-         :depthWrite false
-         :blending THREE/AdditiveBlending}))
+         :depthWrite false}))
 
 (def run-phase-colors
   {"encounter-ice" "#ff4d4d"
