@@ -1,3 +1,33 @@
+## Test games without clicking (dev only)
+
+With the dev server running (`bin/up`), `bin/dev-game` sets up and drives a
+game between two test users, `devcorp` (Corp) and `devrunner` (Runner). They are
+created on first use. It talks to the server's nREPL (port 44867) and takes
+about a second per call.
+
+    bin/dev-game new                    # fresh System Gateway game, both hands kept
+    bin/dev-game scenario run           # ... played up to a live run (Jailbreak on HQ)
+    bin/dev-game state                  # short summary: turn, credits, hands, prompts, log
+    bin/dev-game act corp credit        # any game command as either side
+    bin/dev-game play corp Palisade HQ  # play/install a card from hand by title
+    bin/dev-game choose runner HQ       # answer the current prompt
+    bin/dev-game tutor runner Jailbreak # dev cheat: move a card from deck to hand
+    bin/dev-game end                    # close the dev game
+
+To watch or play in a browser, open
+
+    http://localhost:1042/play?dev-login=devrunner
+
+(or `devcorp`). That logs the browser in as the test user, skips the start
+dialog and opens the running game. Client options for that tab can be added,
+e.g. `&dev-opts=board-3d,board-3d-playmat=/img/playmats/mat.jpg`. This only
+exists in dev builds (`src/cljs/dev/nr.cljs`). One browser can play one side
+while `bin/dev-game` plays the other.
+
+`bin/dev-repl '<clojure expr>'` evaluates any expression in the running server,
+e.g. `bin/dev-repl "(web.dev-game/summary)"`. The game helpers live in
+`dev/src/clj/web/dev_game.clj`.
+
 ## Profiling Database Queries
 
 This document gives a short introduction on profiling database queries and

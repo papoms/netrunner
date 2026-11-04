@@ -1,0 +1,30 @@
+#!/usr/bin/env python3
+"""Set up and drive a local test game: devcorp vs devrunner (web.dev-game).
+
+    bin/dev-game new [beginner|intermediate]   fresh System Gateway game, hands kept
+    bin/dev-game scenario run                  ... played up to a live run (Jailbreak on HQ)
+    bin/dev-game state                         short summary
+    bin/dev-game act <corp|runner> <command> [args-edn]
+    bin/dev-game play <side> <title> [server]
+    bin/dev-game choose <side> <text>
+    bin/dev-game tutor <side> <title>          move a card from deck to hand (dev cheat)
+    bin/dev-game end                           close the dev game
+
+Browsers: http://localhost:1042/play?dev-login=devrunner (or devcorp)
+logs that browser in as the test user and opens the game (dev builds only).
+"""
+import json
+import os
+import subprocess
+import sys
+
+if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help", "help"):
+    print(__doc__)
+    sys.exit(0)
+
+# EDN vector of strings (JSON string escapes are valid EDN)
+args = "[" + " ".join(json.dumps(a) for a in sys.argv[1:]) + "]"
+code = ("(do (require 'web.dev-game :reload)"
+        f" (println (web.dev-game/cli {args})))")
+repl = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dev-repl")
+sys.exit(subprocess.call([repl, code]))
