@@ -41,6 +41,13 @@
 
 (def mat-thickness 0.03)
 
+;; cards are thin rounded slabs (real cards: 63 x 88 mm, ~3 mm corner radius;
+;; the thickness is exaggerated a little so the edge is visible)
+(def card-radius 0.032)
+(def card-thickness 0.006)
+(def card-edge-color "#c9c6bf")  ; the paper core seen on the edge
+(def pile-edge-color "#8d8a84")
+
 ;; the ice the runner is approaching threatens to stand up (its corp-side edge
 ;; lifts a little, pivoting on the runner-side edge); the encountered ice turns
 ;; from sideways to upright and stands facing the runner to block the run
@@ -69,11 +76,17 @@
 ;; (a texture finished loading, the pane was resized)
 (defonce redraw-requested (atom true))
 (defonce texture-loader (THREE/TextureLoader.))
+;; the GPU's maximum, set when the renderer is created (usually 16)
+(defonce max-anisotropy (atom 1))
 
 (defn- texture [url]
   (or (.get texture-cache url)
       (let [^js t (.load texture-loader url #(reset! redraw-requested true))]
         (set! (.-colorSpace t) THREE/SRGBColorSpace)
+        ;; cards are seen at a slant and small: trilinear mipmaps keep them from
+        ;; shimmering, anisotropic filtering keeps them sharp at an angle
+        (set! (.-minFilter t) THREE/LinearMipmapLinearFilter)
+        (set! (.-anisotropy t) @max-anisotropy)
         (.set texture-cache url t)
         t)))
 
@@ -88,6 +101,7 @@
             _ (draw-fn ctx)
             ^js t (THREE/CanvasTexture. canvas)]
         (set! (.-colorSpace t) THREE/SRGBColorSpace)
+        (set! (.-anisotropy t) @max-anisotropy)
         (.set texture-cache k t)
         t)))
 
@@ -354,6 +368,49 @@
     (set! (.. m -rotation -x) (- (/ js/Math.PI 2)))
     m))
 
+(defn- rounded-shape [w h r]
+  (let [^js s (THREE/Shape.)
+        x (- (/ w 2))
+        y (- (/ h 2))
+        pi js/Math.PI]
+    (.moveTo s (+ x r) y)
+    (.lineTo s (- (+ x w) r) y)
+    (.absarc s (- (+ x w) r) (+ y r) r (* -0.5 pi) 0 false)
+    (.lineTo s (+ x w) (- (+ y h) r))
+    (.absarc s (- (+ x w) r) (- (+ y h) r) r 0 (* 0.5 pi) false)
+    (.lineTo s (+ x r) (+ y h))
+    (.absarc s (+ x r) (- (+ y h) r) r (* 0.5 pi) pi false)
+    (.lineTo s x (+ y r))
+    (.absarc s (+ x r) (+ y r) r pi (* 1.5 pi) false)
+    s))
+
+(defn- rounded-geometry
+  "A flat rounded rectangle in the xy plane with uvs spanning 0..1 like a PlaneGeometry."
+  [w h r]
+  (let [^js g (THREE/ShapeGeometry. (rounded-shape w h r) 8)
+        ^js pos (.. g -attributes -position)
+        ^js uv (.. g -attributes -uv)]
+    (dotimes [i (.-count pos)]
+      (.setXY uv i (+ 0.5 (/ (.getX pos i) w)) (+ 0.5 (/ (.getY pos i) h))))
+    g))
+
+;; shared by all cards
+(def ^:private card-face-geometry (delay (rounded-geometry card-w card-h card-radius)))
+(def ^:private card-glow-geometry (delay (rounded-geometry (+ card-w 0.08) (+ card-h 0.08) (+ card-radius 0.04))))
+(def ^:private card-body-geometry
+  ;; the card's edge: the rounded outline extruded 1 unit up (y 0..1), scaled to the thickness
+  (delay (doto (THREE/ExtrudeGeometry. (rounded-shape card-w card-h card-radius)
+                                       #js {:depth 1 :bevelEnabled false :curveSegments 8})
+           (.rotateX (- (/ js/Math.PI 2))))))
+
+(defn- card-plane
+  "A card-shaped mesh lying flat, facing up (or down with `down?`)."
+  ([geometry material] (card-plane geometry material false))
+  ([geometry material down?]
+   (let [^js m (THREE/Mesh. @geometry material)]
+     (set! (.. m -rotation -x) (* (if down? 1 -1) (/ js/Math.PI 2)))
+     m)))
+
 ;;; Card front shader: the card texture, plus a holo effect while hovered
 ;;; (same recipe as the CSS effect on the zoomed card in nr.gameboard.holo:
 ;;; an overlay glare and a color-dodge rainbow band around the pointer).
@@ -416,9 +473,7 @@
                         :uHolo #js {:value 0}}
          :vertexShader card-vertex-shader
          :fragmentShader card-fragment-shader
-         :transparent true
-         ;; standing ice turns its face to the runner, so the corp sees its back
-         :side THREE/DoubleSide}))
+         :transparent true}))
 
 ;;; Attack lane: a calm animated strip under the attacked column during a run:
 ;;; soft light streaks gliding towards the server and a few drifting particles. u runs across the lane, v along it (0 = runner side, 1 = server).
@@ -498,6 +553,9 @@
 (def hover-lift 0.12)  ; how far a hovered card rises off the table
 (def attacked-lift 0.05) ; keeps shimmering (slightly tilted) cards above the lane
 
+;; invisible, but still hit by the raycaster
+(def ^:private hit-material (delay (THREE/MeshBasicMaterial. #js {:visible false})))
+
 (defn- make-card-object [{:keys [pile]}]
   (let [^js group (THREE/Group.)
         ;; the hovered card tilts inside its group, so the group's own
@@ -505,45 +563,64 @@
         ^js tilt (THREE/Group.)
         ;; between the two: standing up approached / encountered ice
         ^js pose (THREE/Group.)
-        ^js front (plane card-w card-h (card-front-material))
-        ^js glow (plane (+ card-w 0.08) (+ card-h 0.08)
-                    (THREE/MeshBasicMaterial. #js {:color "#ffffff" :transparent true :opacity 0.85}))
-        ^js overlay (plane card-w card-h (THREE/MeshBasicMaterial. #js {:transparent true :depthWrite false}))]
-    (set! (.. glow -position -y) -0.001)
-    (set! (.. overlay -position -y) 0.001)
+        ;; a card is a thin slab: edge (body), face on top, card back below
+        ^js body (THREE/Mesh. @card-body-geometry
+                              (THREE/MeshBasicMaterial. #js {:color (if pile pile-edge-color card-edge-color)}))
+        ^js front (card-plane card-face-geometry (card-front-material))
+        ^js back (card-plane card-face-geometry (THREE/MeshBasicMaterial. #js {:transparent true}) true)
+        ^js glow (card-plane card-glow-geometry
+                             (THREE/MeshBasicMaterial. #js {:color "#ffffff" :transparent true :opacity 0.85}))
+        ^js overlay (card-plane card-face-geometry (THREE/MeshBasicMaterial. #js {:transparent true :depthWrite false}))
+        ;; pointer hits are tested against this untilted copy of the card: testing
+        ;; the tilting card itself feeds back (the edge under the pointer lifts,
+        ;; slides away from it, the hover drops, the card falls flat, ...) and
+        ;; makes it flip back and forth. It still follows a standing ice's pose.
+        ^js hit (card-plane card-face-geometry @hit-material)
+        ;; soft shadow on the table; it stays down there when the card lifts or floats
+        ^js shadow (plane (* 1.2 card-w) (* 1.2 card-h)
+                          (THREE/MeshBasicMaterial. #js {:map (shadow-texture) :transparent true
+                                                         :opacity 0.55 :depthWrite false}))]
     (set! (.-visible glow) false)
     (set! (.-visible overlay) false)
-    (.add tilt glow)
-    (.add tilt front)
-    (.add tilt overlay)
+    (set! (.. back -position -y) -0.0003)
+    (set! (.-renderOrder shadow) -1)
+    (doseq [^js m [glow body back front overlay]]
+      (.add tilt m))
     (.add pose tilt)
+    (.add pose hit)
     (.add group pose)
-    (when pile
-      (let [^js box (THREE/Mesh. (THREE/BoxGeometry. card-w 1 card-h)
-                             (THREE/MeshBasicMaterial. #js {:color "#1b1b1f"}))]
-        (.add tilt box)
-        (set! (.. group -userData -box) box)))
-    ;; shadow on the table, only shown for floating cards (the run's event)
-    (let [^js shadow (plane (* 1.25 card-w) (* 1.25 card-h)
-                            (THREE/MeshBasicMaterial. #js {:map (shadow-texture) :transparent true
-                                                           :depthWrite false}))]
-      (set! (.-visible shadow) false)
-      (.add group shadow)
-      (set! (.. group -userData -shadow) shadow))
-    (set! (.. group -userData -tilt) tilt)
-    (set! (.. group -userData -pose) pose)
-    (set! (.. group -userData -front) front)
-    (set! (.. front -userData -card-group) group) ; for raycast hits
-    (set! (.. group -userData -glow) glow)
-    (set! (.. group -userData -overlay) overlay)
+    (.add group shadow)
+    (doto (.-userData group)
+      (aset "isPile" (boolean pile))
+      (aset "body" body)
+      (aset "back" back)
+      (aset "shadow" shadow)
+      (aset "tilt" tilt)
+      (aset "pose" pose)
+      (aset "front" front)
+      (aset "glow" glow)
+      (aset "overlay" overlay)
+      (aset "hit" hit))
+    (set! (.. hit -userData -card-group) group) ; for raycast hits
     group))
 
-(defn- update-card-object! [^js group {:keys [url highlight badges strength pile count pos rot float push-dir under-attack ice-pose pose-dir] :as entry}]
+(defn- set-thickness!
+  "Stacks the card's layers on a slab of height `h` (one card, or a whole pile)."
+  [^js ud h]
+  (.set (.. ud -body -scale) 1 h 1)
+  (set! (.. ud -front -position -y) (+ h 0.0003))
+  (set! (.. ud -overlay -position -y) (+ h 0.0008))
+  (set! (.. ud -hit -position -y) (+ h 0.0003))
+  ;; the glow pokes out around the slab, just above the table
+  (set! (.. ud -glow -position -y) 0.0005))
+
+(defn- update-card-object! [^js group {:keys [url highlight badges strength pile count pos rot float push-dir under-attack ice-pose pose-dir card side] :as entry}]
   (let [^js ud (.-userData group)
         ^js front (.-front ud)
         ^js glow (.-glow ud)
         ^js overlay (.-overlay ud)
         ^js shadow (.-shadow ud)
+        back-url (board/facedown-card-url (or side (:side card) "Corp"))
         [x y z] pos]
     (set! (.-entry ud) entry)
     (set! (.-float ud) (boolean float))
@@ -554,12 +631,23 @@
     (set! (.-pushDir ud) (or push-dir 0))
     (set! (.-icePose ud) (some-> ice-pose name))
     (when pose-dir (set! (.-poseDir ud) pose-dir))
-    (set! (.-visible shadow) (boolean float))
-    ;; the shadow lies on the table below the floating card
-    (set! (.. shadow -position -y) (+ (- y) 0.004))
+    ;; the shadow lies on the table, offset a little as if lit from above the
+    ;; far side of the table (floating cards move theirs in lerp-objects!)
+    (set! (.. shadow -position -y) (+ (- y) 0.002))
+    (when-not float
+      (.set (.-scale shadow) 1 1 1)
+      ;; the group may be turned (sideways ice): offset in table space
+      (let [ox 0.02 oz 0.035
+            c (js/Math.cos rot) s (js/Math.sin rot)]
+        (set! (.. shadow -position -x) (- (* ox c) (* oz s)))
+        (set! (.. shadow -position -z) (+ (* ox s) (* oz c)))))
     (when (not= url (.-url ud))
       (set! (.-url ud) url)
       (set! (.. front -material -uniforms -map -value) (texture url)))
+    (when (not= back-url (.-backUrl ud))
+      (set! (.-backUrl ud) back-url)
+      (set! (.. ud -back -material -map) (texture back-url))
+      (set! (.. ud -back -material -needsUpdate) true))
     (if-let [color (get highlight-colors highlight)]
       (do (.set (.. glow -material -color) color)
           (set! (.-visible glow) true))
@@ -570,15 +658,10 @@
           (set! (.-visible overlay) true))
       (set! (.-visible overlay) false))
     (if pile
-      (let [h (max 0.001 (* 0.003 (min count 40)))
-            ^js box (.-box ud)]
-        (set! (.-visible group) (pos? count))
-        (.set (.-scale box) 1 h 1)
-        (set! (.. box -position -y) (/ h 2))
-        (set! (.. front -position -y) (+ h 0.0005))
-        (set! (.. glow -position -y) (+ h 0.0001))
-        (set! (.. overlay -position -y) (+ h 0.001)))
-      (set! (.-visible group) true))
+      (do (set! (.-visible group) (pos? count))
+          (set-thickness! ud (max card-thickness (* 0.003 (min count 40)))))
+      (do (set! (.-visible group) true)
+          (set-thickness! ud card-thickness)))
     (set! (.-target ud) #js [x y z rot])))
 
 (defn- spawn-position
@@ -631,9 +714,14 @@
   (if marker
     (let [{:keys [x z phase]} marker]
       (set! (.-visible run-marker) true)
-      (.set (.. run-marker -material -color)
-            (case phase "encounter-ice" "#ff4d4d" "approach-ice" "#ffcc00" "#4aa3ff"))
-      (set! (.. run-marker -userData -target) #js [x 0.35 z]))
+      (let [color (case phase "encounter-ice" "#ff4d4d" "approach-ice" "#ffcc00" "#4aa3ff")
+            ^js m (.-material run-marker)]
+        (.set (.-color m) color)
+        (.set (.-emissive m) color)
+        (.set (.. run-marker -userData -edges -material -color) color))
+      ;; hovers above the ice: higher while it lifts or stands up
+      (set! (.. run-marker -userData -target)
+            #js [x (case phase "encounter-ice" 1.15 "approach-ice" 0.6 0.4) z]))
     (set! (.-visible run-marker) false)))
 
 (defn- sync-run-lane! [{:keys [^js run-lane]} lane]
@@ -756,7 +844,7 @@
       (let [^js ud (.-userData obj)
             ^js tilt (.-tilt ud)
             ^js uniforms (.. ud -front -material -uniforms)
-            hovered (and hover-id (= id hover-id) (not (.-box ud)))
+            hovered (and hover-id (= id hover-id) (not (.-isPile ud)))
             [tx tz ty th] (if hovered
                             [(* (- hv 0.5) 2 hover-tilt) (* (- hu 0.5) 2 hover-tilt) hover-lift 1]
                             [0 0 0 0])
@@ -822,9 +910,15 @@
     (when (.-visible run-marker)
       (when-let [t (.. run-marker -userData -target)]
         (let [^js p (.-position run-marker)]
-          (.set p (approach (.-x p) (aget t 0)) (aget t 1) (approach (.-z p) (aget t 2))))
-        ;; the marker spins while a run is active
-        (set! (.. run-marker -rotation -y) (+ (.. run-marker -rotation -y) 0.03))
+          ;; glides (slower upwards, in step with the ice standing up) and bobs
+          (let [^js ud (.-userData run-marker)
+                base (+ (or (.-baseY ud) (aget t 1)) (* ice-pose-speed (- (aget t 1) (or (.-baseY ud) (aget t 1)))))]
+            (set! (.-baseY ud) base)
+            (.set p (approach (.-x p) (aget t 0))
+                  (+ base (* 0.03 (js/Math.sin (* now 2))))
+                  (approach (.-z p) (aget t 2)))))
+        ;; the marker spins slowly while a run is active
+        (set! (.. run-marker -rotation -y) (+ (.. run-marker -rotation -y) 0.015))
         (vreset! moving true)))
     (when (.-visible run-lane)
       (set! (.. run-lane -material -uniforms -uTime -value) now)
@@ -837,11 +931,11 @@
   (let [rect (.getBoundingClientRect (.-domElement renderer))
         ndc (THREE/Vector2. (- (* 2 (/ (- (.-clientX e) (.-left rect)) (.-width rect))) 1)
                             (+ (* -2 (/ (- (.-clientY e) (.-top rect)) (.-height rect))) 1))
-        fronts (into-array (for [^js obj (es6-iterator-seq (.values objects))
-                                 :when (.-visible obj)]
-                             (.. obj -userData -front)))]
+        targets (into-array (for [^js obj (es6-iterator-seq (.values objects))
+                                  :when (.-visible obj)]
+                              (.. obj -userData -hit)))]
     (.setFromCamera raycaster ndc camera)
-    (when-let [^js hit (first (.intersectObjects raycaster fronts false))]
+    (when-let [^js hit (first (.intersectObjects raycaster targets false))]
       (let [entry (.. hit -object -userData -card-group -userData -entry)
             ^js uv (.-uv hit)]
         (when (:card entry)
@@ -867,17 +961,35 @@
           ^js table-edge (THREE/MeshBasicMaterial. #js {:color "#15171b"})
           table (THREE/Mesh. (THREE/BoxGeometry. 1 1 1)
                              #js [table-edge table-edge table-top table-edge table-edge table-edge])
-          run-marker (THREE/Mesh. (THREE/ConeGeometry. 0.22 0.45 4)
-                                  (THREE/MeshBasicMaterial. #js {:color "#ff4d4d"}))
+          ;; a small translucent crystal: a stretched octahedron, lit (the only
+          ;; lit object; cards and table are unlit) with bright edges
+          ^js run-marker (THREE/Mesh. (doto (THREE/OctahedronGeometry. 0.1) (.scale 1 1.7 1))
+                                      (THREE/MeshPhongMaterial.
+                                        #js {:color "#ff4d4d" :emissive "#ff4d4d" :emissiveIntensity 0.35
+                                             :specular "#ffffff" :shininess 90 :flatShading true
+                                             :transparent true :opacity 0.55 :depthWrite false}))
           run-lane (plane 1 1 (lane-material))]
       (.setPixelRatio renderer (min 2 (.-devicePixelRatio js/window)))
+      (reset! max-anisotropy (.. renderer -capabilities (getMaxAnisotropy)))
+      ;; textures loaded before this renderer existed
+      (doseq [^js t (es6-iterator-seq (.values texture-cache))]
+        (set! (.-anisotropy t) @max-anisotropy)
+        (when (.-image t)
+          (set! (.-needsUpdate t) true)))
       (.appendChild container (.-domElement renderer))
       (.add table-group table)
       ;; the mat's top sits just under the attack lane (-0.003) and the cards (0)
       (set! (.. table-group -position -y) (- -0.006 (/ mat-thickness 2)))
       (set! (.. table-group -rotation -y) (if (= me :runner) (- (/ js/Math.PI 2)) (/ js/Math.PI 2)))
       (.add scene table-group)
-      (set! (.. run-marker -rotation -x) js/Math.PI)
+      (let [^js edges (THREE/LineSegments. (THREE/EdgesGeometry. (.-geometry run-marker))
+                                           (THREE/LineBasicMaterial. #js {:color "#ff4d4d" :transparent true :opacity 0.9}))]
+        (.add run-marker edges)
+        (set! (.. run-marker -userData -edges) edges))
+      (.add scene (THREE/AmbientLight. "#ffffff" 0.7))
+      (let [^js sun (THREE/DirectionalLight. "#ffffff" 2.2)]
+        (.set (.-position sun) 1 4 2)
+        (.add scene sun))
       (set! (.-visible run-marker) false)
       (.add scene run-marker)
       (set! (.-visible run-lane) false)
