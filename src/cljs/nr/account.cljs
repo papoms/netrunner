@@ -657,7 +657,14 @@
                              :name "zoom-last-played-or-rezzed"
                              :checked (:zoom-last-played-or-rezzed @s)
                              :on-change #(swap! s assoc :zoom-last-played-or-rezzed (.. % -target -checked))}]
-             [tr-span [:settings_zoom-last-played-or-rezzed "Zoom the most recently rezzed or played card"]]]]]
+             [tr-span [:settings_zoom-last-played-or-rezzed "Zoom the most recently rezzed or played card"]]]]
+           [:br]
+           [:div
+            [:label [:input {:type "checkbox"
+                             :name "card-zoom-holo"
+                             :checked (:card-zoom-holo @s)
+                             :on-change #(swap! s assoc :card-zoom-holo (.. % -target -checked))}]
+             [tr-span [:settings_card-zoom-holo "Holo effect on zoomed cards (tilts and shines as you move over a card)"]]]]]
 
           [:section
            [tr-element :h3 [:settings_game-stats " Game Win/Lose statistics "]]
@@ -823,7 +830,7 @@
                    (select-keys [:pronouns :bespoke-sounds :language :card-language :sounds :default-format
                                  :card-unplayable-fade-out :card-hover-movement
                                  :lobby-sounds :sounds-volume :background :custom-bg-url :card-zoom
-                                 :pin-zoom :show-alt-art :card-resolution :pass-on-rez
+                                 :pin-zoom :card-zoom-holo :show-alt-art :card-resolution :pass-on-rez
                                  :auto-select-default-deck-casual :auto-select-default-deck-tournament
                                  :default-game-description :default-save-replay
                                  :default-password :default-password-protect-casual
