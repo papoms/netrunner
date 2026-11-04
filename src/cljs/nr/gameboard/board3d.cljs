@@ -32,6 +32,12 @@
 (def corp-dist 3.4)    ; distance of the corp server roots from the table center
 (def lerp-factor 0.18) ; how fast cards glide to their new position
 
+;; the event that started the current run floats above the table, leans
+;; towards the attacked server and keeps pushing in
+(def run-card-height 0.38)
+(def run-card-lean 0.22)  ; radians
+(def run-card-push 0.14)  ; how far each push moves towards the server
+
 (def highlight-colors
   {:selected "#ffcc00"
    :selectable "#3eff8a"
@@ -87,6 +93,17 @@
       (set! (.-fillStyle ctx) "#e8e8e8")
       (.fillText ctx text 256 48))))
 
+(defn- shadow-texture []
+  (canvas-texture
+    "shadow" 128 160
+    (fn [^js ctx]
+      (let [^js g (.createRadialGradient ctx 64 80 4 64 80 72)]
+        (.addColorStop g 0 "rgba(0,0,0,0.75)")
+        (.addColorStop g 0.55 "rgba(0,0,0,0.45)")
+        (.addColorStop g 1 "rgba(0,0,0,0)")
+        (set! (.-fillStyle ctx) g)
+        (.fillRect ctx 0 0 128 160)))))
+
 (defn- badge-texture
   "Counters (top left) and strength (bottom right) drawn on a transparent card-sized overlay."
   [badges strength]
@@ -124,7 +141,7 @@
       (case where
         :ice (not (:rezzed card))
         :content (not (faceup? card))
-        :pile false
+        (:pile :run) false
         (board/draw-facedown? card))))
 
 (defn- may-zoom?
@@ -262,16 +279,31 @@
                              (row-cards 2 (concat (:resource rig) (:facedown rig))))
         ;; identity, stack and heap form a back row behind the rig, which keeps
         ;; the board narrow (the central pane is often tall and thin)
+        ;; the event that started the current run floats in front of the
+        ;; attacked server (see run-card-entry)
+        run-source (let [c (:source-card run)]
+                     (when (and run-server (= "Event" (:type c)) (:code c)) c))
         runner-discard (get-in gs [:runner :discard])
+        ;; never show the run's event twice: it may already be in the heap
+        heap-top (last (remove #(and run-source (= (:cid %) (:cid run-source))) runner-discard))
         back-z (runner-row-z 3)
         runner-piles (concat
                        [(card-entry (get-in gs [:runner :identity]) :pile [(- rig-step) 0 back-z] 0)]
                        (pile-entry "runner-deck" "Runner" (get-in gs [:runner :deck-count] 0) nil
                                    [0 back-z]
                                    (tr [:game_stack-count "Stack ({$cnt})"] {:cnt (get-in gs [:runner :deck-count] 0)}))
-                       (pile-entry "runner-discard" "Runner" (count runner-discard) (last runner-discard)
+                       (pile-entry "runner-discard" "Runner" (count runner-discard) heap-top
                                    [rig-step back-z]
                                    (tr [:game_heap "Heap ({$cnt})"] {:cnt (count runner-discard)})))
+        run-card (when-let [col (and run-source
+                                     (some (fn [[i k]] (when (= k run-server) i)) (map-indexed vector order)))]
+                   (let [n-ice (count (get-in servers [run-server :ices]))
+                         ;; just outside the outermost ice, on the runner's side
+                         z (+ corp-z (* to-center (+ (/ card-h 2) 0.18 (/ card-w 2) (* n-ice ice-step) 0.45)))]
+                     (assoc (card-entry run-source :run [(col-x col) run-card-height z] 0)
+                            :float true
+                            ;; towards the server along z
+                            :push-dir (- to-center))))
         run-marker (when-let [col (and run-server (some (fn [[i k]] (when (= k run-server) i))
                                                         (map-indexed vector order)))]
                      (let [ices (get-in servers [run-server :ices])
@@ -280,7 +312,7 @@
                                (+ corp-z (* to-center (+ (/ card-h 2) 0.18 (/ card-w 2) (* (dec pos) ice-step))))
                                corp-z)]
                        {:x (col-x col) :z z :phase (:phase run)}))]
-    {:cards (vec (concat corp-cards runner-cards runner-piles))
+    {:cards (vec (concat corp-cards runner-cards runner-piles (when run-card [run-card])))
      :labels (vec labels)
      :run-marker run-marker}))
 
@@ -380,6 +412,13 @@
                              (THREE/MeshBasicMaterial. #js {:color "#1b1b1f"}))]
         (.add tilt box)
         (set! (.. group -userData -box) box)))
+    ;; shadow on the table, only shown for floating cards (the run's event)
+    (let [^js shadow (plane (* 1.25 card-w) (* 1.25 card-h)
+                            (THREE/MeshBasicMaterial. #js {:map (shadow-texture) :transparent true
+                                                           :depthWrite false}))]
+      (set! (.-visible shadow) false)
+      (.add group shadow)
+      (set! (.. group -userData -shadow) shadow))
     (set! (.. group -userData -tilt) tilt)
     (set! (.. group -userData -front) front)
     (set! (.. front -userData -card-group) group) ; for raycast hits
@@ -387,13 +426,19 @@
     (set! (.. group -userData -overlay) overlay)
     group))
 
-(defn- update-card-object! [^js group {:keys [url highlight badges strength pile count pos rot] :as entry}]
+(defn- update-card-object! [^js group {:keys [url highlight badges strength pile count pos rot float push-dir] :as entry}]
   (let [^js ud (.-userData group)
         ^js front (.-front ud)
         ^js glow (.-glow ud)
         ^js overlay (.-overlay ud)
+        ^js shadow (.-shadow ud)
         [x y z] pos]
     (set! (.-entry ud) entry)
+    (set! (.-float ud) (boolean float))
+    (set! (.-pushDir ud) (or push-dir 0))
+    (set! (.-visible shadow) (boolean float))
+    ;; the shadow lies on the table below the floating card
+    (set! (.. shadow -position -y) (+ (- y) 0.004))
     (when (not= url (.-url ud))
       (set! (.-url ud) url)
       (set! (.. front -material -uniforms -map -value) (texture url)))
@@ -497,6 +542,7 @@
   its tilt and holo state. Returns true while anything is still moving."
   [{:keys [objects ^js run-marker hover]}]
   (let [moving (volatile! false)
+        now (/ (js/performance.now) 1000) ; seconds, for the run card's animation
         {hover-id :id [hu hv] :uv} @hover]
     (doseq [[id ^js obj] (es6-iterator-seq (.entries objects))]
       (when-let [t (.. obj -userData -target)]
@@ -519,18 +565,36 @@
             [tx tz ty th] (if hovered
                             [(* (- hv 0.5) 2 hover-tilt) (* (- hu 0.5) 2 hover-tilt) hover-lift 1]
                             [0 0 0 0])
-            ^js tr (.-rotation tilt)
-            rx (approach (.-x tr) tx)
-            rz (approach (.-z tr) tz)
-            ly (approach (.. tilt -position -y) ty)
-            holo (approach (.. uniforms -uHolo -value) th)]
-        (when (or (not= rx (.-x tr)) (not= rz (.-z tr)) (not= ly (.. tilt -position -y))
-                  (not= holo (.. uniforms -uHolo -value)))
-          (vreset! moving true)
-          (set! (.-x tr) rx)
-          (set! (.-z tr) rz)
-          (set! (.. tilt -position -y) ly)
-          (set! (.. uniforms -uHolo -value) holo))
+            ^js tr (.-rotation tilt)]
+        (if (.-float ud)
+          ;; the run's event: leans towards the server, bobs, and every couple
+          ;; of seconds thrusts forward as if pushing into the server
+          (let [dir (.-pushDir ud)
+                pulse (js/Math.pow (max 0 (js/Math.sin (* now 3.2))) 6)
+                push (* dir run-card-push pulse)
+                ^js shadow (.-shadow ud)]
+            (vreset! moving true)
+            (set! (.-x tr) (+ tx (* dir (+ run-card-lean (* 0.12 pulse)))))
+            (set! (.-z tr) (+ tz (* 0.04 (js/Math.sin (* now 1.1)))))
+            (.set (.-position tilt) 0 (+ ty (* 0.025 (js/Math.sin (* now 1.7)))) push)
+            ;; offset as if lit from slightly above and behind the viewer, so it peeks out
+            (set! (.. shadow -position -x) 0.06)
+            (set! (.. shadow -position -z) (+ push 0.12))
+            (.set (.-scale shadow) (- 1 (* 0.08 pulse)) 1 (- 1 (* 0.08 pulse)))
+            (set! (.. uniforms -uHolo -value) (approach (.. uniforms -uHolo -value) th)))
+          (let [rx (approach (.-x tr) tx)
+                rz (approach (.-z tr) tz)
+                ly (approach (.. tilt -position -y) ty)
+                lz (approach (.. tilt -position -z) 0)
+                holo (approach (.. uniforms -uHolo -value) th)]
+            (when (or (not= rx (.-x tr)) (not= rz (.-z tr)) (not= ly (.. tilt -position -y))
+                      (not= lz (.. tilt -position -z)) (not= holo (.. uniforms -uHolo -value)))
+              (vreset! moving true)
+              (set! (.-x tr) rx)
+              (set! (.-z tr) rz)
+              (set! (.. tilt -position -y) ly)
+              (set! (.. tilt -position -z) lz)
+              (set! (.. uniforms -uHolo -value) holo))))
         (when hovered
           (let [^js ptr (.. uniforms -uPointer -value)
                 px (approach (.-x ptr) hu)
