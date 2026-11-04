@@ -551,6 +551,12 @@
 
 (def hover-tilt 0.2)   ; radians at the card's edge
 (def hover-lift 0.12)  ; how far a hovered card rises off the table
+
+;; holding C over a card flies it up in front of the camera to read it
+(def inspect-key "c")
+(def inspect-fill 0.8)    ; share of the view's height (or width) the card fills
+(def inspect-speed 0.22)  ; per frame; quick, easing out as it arrives
+(def inspect-arc 0.35)    ; on the way back the card swings up a little, like a hand putting it down
 (def attacked-lift 0.05) ; keeps shimmering (slightly tilted) cards above the lane
 
 ;; invisible, but still hit by the raycaster
@@ -807,7 +813,8 @@
   [^js obj now moving]
   (let [^js ud (.-userData obj)
         ^js pose (.-pose ud)
-        kind (.-icePose ud)
+        ;; a card being inspected (or flying back) lies flat in its pose group
+        kind (when-not (.-flying ud) (.-icePose ud))
         ^js q (.-quaternion pose)
         ^js p (.-position pose)]
     ;; nothing to do for the many cards lying flat
@@ -819,14 +826,74 @@
             (.lerp p pose-v ice-pose-speed)))
       (vreset! moving true))))
 
+(def ^:private inspect-v (THREE/Vector3.))
+(def ^:private inspect-q (THREE/Quaternion.))
+(def ^:private inspect-e (THREE/Euler.))
+(def ^:private face-camera-q
+  ;; the card faces up (+y) with its top at -z: turned a quarter about x it
+  ;; faces the camera (+z) with its top up
+  (.setFromAxisAngle (THREE/Quaternion.) (THREE/Vector3. 1 0 0) (/ js/Math.PI 2)))
+
+(defn- inspect-pose!
+  "Sets inspect-v / inspect-q to a pose in front of `camera` where the card fills
+  most of the visible view (which may be offset, see resize!), facing it upright."
+  [^js camera]
+  (let [^js view (.-view camera)
+        offset? (and view (.-enabled view))
+        tan (* (js/Math.tan (/ (* (.-fov camera) js/Math.PI) 360))
+               (if offset? (/ (.-height view) (.-fullHeight view)) 1))
+        aspect (if offset? (/ (.-width view) (.-height view)) (.-aspect camera))
+        d (max (/ card-h (* inspect-fill 2 tan))
+               (/ card-w (* inspect-fill 2 tan aspect)))
+        ^js campos (.-position camera)]
+    ;; the ray through the middle of the visible view
+    (-> (.set inspect-v 0 0 0.5) (.unproject camera) (.sub campos) (.normalize)
+        (.multiplyScalar d) (.add campos))
+    (-> (.copy inspect-q (.-quaternion camera)) (.multiply face-camera-q))))
+
+(defn- fly-card!
+  "Moves an inspected card towards the camera, or (when `inspected` is false) a
+  card that was inspected back to its place. Returns true while it is away."
+  [^js obj inspected ^js camera]
+  (let [^js ud (.-userData obj)
+        ^js p (.-position obj)
+        ^js q (.-quaternion obj)
+        t (.-target ud)]
+    (if inspected
+      (inspect-pose! camera)
+      (do (.set inspect-v (aget t 0) (aget t 1) (aget t 2))
+          (.setFromEuler inspect-q (.set inspect-e 0 (aget t 3) 0))))
+    (let [dist (.distanceTo p inspect-v)]
+      (if (and (not inspected) (< dist 0.002) (< (.angleTo q inspect-q) 0.002))
+        ;; landed
+        (do (.copy p inspect-v)
+            (.set (.-rotation obj) 0 (aget t 3) 0)
+            (set! (.-flying ud) false)
+            (set! (.. ud -shadow -visible) true)
+            false)
+        (do (set! (.-flying ud) true)
+            (set! (.. ud -shadow -visible) false)
+            ;; on the way back, aim a little above the target while still far
+            ;; away, so the card arcs down onto the table instead of sliding
+            (when-not inspected
+              (set! (.-y inspect-v) (+ (.-y inspect-v) (* inspect-arc (min 1 dist)))))
+            (.lerp p inspect-v inspect-speed)
+            (.slerp q inspect-q inspect-speed)
+            true)))))
+
 (defn- lerp-objects!
   "Glides every card towards its target position, and the hovered card towards
   its tilt and holo state. Returns true while anything is still moving."
-  [{:keys [objects ^js run-marker ^js run-lane hover]}]
+  [{:keys [objects ^js run-marker ^js run-lane hover inspect ^js camera]}]
   (let [moving (volatile! false)
         now (/ (js/performance.now) 1000) ; seconds, for the run card's animation
-        {hover-id :id [hu hv] :uv} @hover]
+        {hover-id :id [hu hv] :uv} @hover
+        inspect-id @inspect]
     (doseq [[id ^js obj] (es6-iterator-seq (.entries objects))]
+      (if (and (.. obj -userData -target)
+               (or (= id inspect-id) (.. obj -userData -flying)))
+        (when (fly-card! obj (= id inspect-id) camera)
+          (vreset! moving true))
       (when-let [t (.. obj -userData -target)]
         (let [^js p (.-position obj)
               ^js r (.-rotation obj)
@@ -837,7 +904,7 @@
           (when (or (not= x (.-x p)) (not= y (.-y p)) (not= z (.-z p)) (not= ry (.-y r)))
             (vreset! moving true)
             (.set p x y z)
-            (set! (.-y r) ry))))
+            (set! (.-y r) ry)))))
       (pose-ice! obj now moving)
       ;; hover: the side under the pointer comes up towards the viewer, and the
       ;; holo shine follows the pointer (uv: u right, v up; the card's top is -z)
@@ -1007,7 +1074,8 @@
          :playmat (atom nil)
          :raycaster (THREE/Raycaster.) :view view
          ;; {:id card-id :uv [u v]} of the card under the pointer
-         :hover (atom nil)}))
+         :hover (atom nil)
+         :inspect (atom nil)})) ; id of the card held up with the inspect key
     (catch :default e
       (js/console.warn "3D board: could not create WebGL renderer" e)
       nil)))
@@ -1167,6 +1235,22 @@
         down-pos (atom nil)
         hovered (atom nil)
         resize-observer (atom nil)
+        hovered-card? (atom false)
+        set-inspect! (fn [id] (some-> @ctx :inspect (reset! id)))
+        typing? (fn [^js e]
+                  (let [^js t (.-target e)]
+                    (or (#{"INPUT" "TEXTAREA" "SELECT"} (.-tagName t)) (.-isContentEditable t))))
+        on-key-down (fn [^js e]
+                      (when (and (= inspect-key (str/lower-case (.-key e)))
+                                 (not (.-repeat e)) (not (typing? e))
+                                 (not (or (.-ctrlKey e) (.-metaKey e) (.-altKey e)))
+                                 @hovered-card?)
+                        (.preventDefault e)
+                        (set-inspect! @hovered)))
+        on-key-up (fn [^js e]
+                    (when (= inspect-key (str/lower-case (.-key e)))
+                      (set-inspect! nil)))
+        on-blur (fn [_] (set-inspect! nil))
         watch-key (keyword (gensym "board3d"))
         on-pointer-down (fn [^js e] (reset! down-pos [(.-clientX e) (.-clientY e)]))
         on-pointer-up
@@ -1185,19 +1269,24 @@
           (let [{:keys [card back? uv] :as entry} (card-at @ctx e)
                 id (:id entry)
                 zoomable (and card (may-zoom? card back?))]
+            (reset! hovered-card? (boolean card))
             (when (not= id @hovered)
               (reset! hovered id)
               (if zoomable
                 (put-game-card-in-channel card zoom-channel)
                 (put! zoom-channel false)))
-            ;; tilt and shine of the hovered card on the board
-            (reset! (:hover @ctx) (when (and card uv) {:id id :uv uv}))
+            ;; tilt and shine of the hovered card on the board; while a card is
+            ;; held up for reading, only that one reacts
+            (let [inspecting @(:inspect @ctx)]
+              (reset! (:hover @ctx) (when (and card uv (or (nil? inspecting) (= id inspecting)))
+                                      {:id id :uv uv})))
             ;; drives the holo effect on the zoomed card (UV v points up, screen y down)
             (if (and zoomable uv)
               (set-zoom-pointer! (first uv) (- 1 (second uv)))
               (clear-zoom-pointer!))))
         on-pointer-leave (fn [_]
                            (reset! hovered nil)
+                           (reset! hovered-card? false)
                            (some-> @ctx :hover (reset! nil))
                            (put! zoom-channel false)
                            (clear-zoom-pointer!))
@@ -1235,12 +1324,18 @@
              (.addEventListener canvas "pointerup" on-pointer-up)
              (.addEventListener canvas "pointermove" on-pointer-move)
              (.addEventListener canvas "pointerleave" on-pointer-leave)
+             (.addEventListener js/window "keydown" on-key-down)
+             (.addEventListener js/window "keyup" on-key-up)
+             (.addEventListener js/window "blur" on-blur)
              (add-watch game-state watch-key (fn [_ _ _ _] (reset! dirty true)))
              (animate))
            (reset! failed true)))
        :component-will-unmount
        (fn [_]
          (remove-watch game-state watch-key)
+         (.removeEventListener js/window "keydown" on-key-down)
+         (.removeEventListener js/window "keyup" on-key-up)
+         (.removeEventListener js/window "blur" on-blur)
          (some-> @frame js/cancelAnimationFrame)
          (some-> @resize-observer .disconnect)
          (when-let [c @ctx]
