@@ -400,58 +400,58 @@
          :fragmentShader card-fragment-shader
          :transparent true}))
 
-;;; Attack lane: animated strip under the attacked column during a run.
-;;; u runs across the lane, v along it (0 = runner side, 1 = server).
+;;; Attack lane: a calm animated strip under the attacked column during a run:
+;;; soft light streaks gliding towards the server and a few drifting particles. u runs across the lane, v along it (0 = runner side, 1 = server).
 
 (def ^:private lane-fragment-shader
   "uniform float uTime;
-   uniform vec3 uColor;
+   uniform vec3 uColor;    // run phase colour
    uniform float uFlip;    // 1.0 when the lane's v axis must be reversed
    varying vec2 vUv;
 
    float hash(float n) { return fract(sin(n) * 43758.5453); }
-   float noise(float x) {
-     float i = floor(x);
-     return mix(hash(i), hash(i + 1.0), smoothstep(0.0, 1.0, fract(x)));
-   }
+
+   // soft gaussian falloff: 1 at x = 0, ~0 beyond a few widths
+   float soft(float x, float w) { return exp(-(x * x) / (w * w)); }
 
    void main() {
      float u = vUv.x;
      float v = mix(vUv.y, 1.0 - vUv.y, uFlip);
-     // (smoothstep needs edge0 < edge1: reversed edges are undefined in GLSL)
-     float edge = smoothstep(0.0, 0.25, u) * (1.0 - smoothstep(0.75, 1.0, u));
-     float ends = smoothstep(0.0, 0.12, v) * (1.0 - smoothstep(0.9, 1.0, v));
+     float endFade = smoothstep(0.0, 0.15, v) * (1.0 - smoothstep(0.85, 1.0, v));
 
-     // soft glow and pulses flowing towards the server
-     float glow = 0.28 * edge;
-     float flow = pow(fract(v * 4.0 - uTime * 0.9), 6.0) * edge * 0.7;
+     // no background: only the streaks and particles below are visible
+     vec3 col = vec3(0.0);
 
-     // two jagged electric arcs, re-shaped ~12 times a second, flickering
-     float arcs = 0.0;
-     for (int k = 0; k < 2; k++) {
+     // soft light streaks gliding towards the server at different speeds
+     vec3 cyan = vec3(0.35, 0.75, 1.0);
+     vec3 magenta = vec3(0.85, 0.35, 1.0);
+     for (int k = 0; k < 6; k++) {
        float fk = float(k);
-       float t = floor(uTime * 12.0 + fk * 7.0);
-       float off = (noise(v * 9.0 + t * 1.7 + fk * 31.0) - 0.5) * 0.5
-                 + (noise(v * 23.0 + t * 3.1) - 0.5) * 0.15;
-       float d = abs(u - 0.5 - off);
-       float on = step(0.35, hash(t + fk * 13.0));
-       arcs += on * ((1.0 - smoothstep(0.0, 0.03, d)) + 0.35 * (1.0 - smoothstep(0.0, 0.12, d)));
+       float row = 0.18 + 0.64 * hash(fk * 3.7 + 1.0);
+       float len = 0.18 + 0.22 * hash(fk * 5.3 + 2.0);
+       float speed = 0.12 + 0.18 * hash(fk * 7.1 + 3.0);
+       float head = fract(hash(fk * 9.7 + 4.0) + uTime * speed) * (1.0 + len);
+       float behind = head - v;                       // > 0 behind the head
+       // soft rounded head, long fading tail
+       float tail = smoothstep(-0.02, 0.0, behind) * (1.0 - smoothstep(0.0, len, behind));
+       float body = soft(u - row, 0.03) * tail * (0.35 + 0.65 * clamp(1.0 - behind / len, 0.0, 1.0));
+       float halo = soft(u - row, 0.1) * tail * 0.3;
+       vec3 c = mix(cyan, magenta, hash(fk * 11.3 + 5.0));
+       col += c * (body + halo) * 0.8;
      }
 
-     // sparks drifting towards the server
-     float sparks = 0.0;
-     vec2 cell = vec2(u * 6.0, v * 18.0 - uTime * 2.2);
+     // sparse soft particles drifting slowly towards the server, gently twinkling
+     vec2 cell = vec2(u * 7.0, v * 14.0 - uTime * 0.35);
      vec2 id = floor(cell);
      vec2 f = fract(cell) - 0.5;
      float h = hash(id.x * 17.0 + id.y * 131.0);
-     if (h > 0.82) {
+     if (h > 0.7) {
        vec2 c = vec2(hash(h * 7.0) - 0.5, hash(h * 11.0) - 0.5) * 0.6;
-       sparks = (1.0 - smoothstep(0.0, 0.12, length(f - c))) * (0.5 + 0.5 * sin(uTime * 20.0 + h * 50.0));
+       float twinkle = 0.6 + 0.4 * sin(uTime * 1.5 + h * 40.0);
+       col += cyan * soft(length(f - c), 0.08) * twinkle * 0.35;
      }
 
-     float a = (glow + flow + arcs * 0.9 + sparks) * ends;
-     vec3 col = uColor * a + vec3(1.0) * arcs * 0.35 * ends;
-     gl_FragColor = vec4(col, 1.0);
+     gl_FragColor = vec4(col * endFade, 1.0);
      #include <colorspace_fragment>
    }")
 
@@ -472,6 +472,7 @@
 
 (def hover-tilt 0.2)   ; radians at the card's edge
 (def hover-lift 0.12)  ; how far a hovered card rises off the table
+(def attacked-lift 0.05) ; keeps shimmering (slightly tilted) cards above the lane
 
 (defn- make-card-object [{:keys [pile]}]
   (let [^js group (THREE/Group.)
@@ -696,14 +697,15 @@
           (let [;; the attacked server's cards stay on the table but shimmer: a
                 ;; wandering virtual pointer, each card on its own rhythm
                 attacked (and (.-underAttack ud) (not hovered))
-                [tx tz th] (if attacked
+                [tx tz th ty] (if attacked
                              (let [s (+ now (.-seed ud))
                                    au (+ 0.5 (* 0.3 (js/Math.sin (* s 0.91))) (* 0.12 (js/Math.sin (+ (* s 2.3) 0.7))))
                                    av (+ 0.5 (* 0.3 (js/Math.sin (+ (* s 0.73) 1.9))) (* 0.12 (js/Math.sin (+ (* s 1.7) 2.6))))]
                                (vreset! moving true)
                                (.set (.. uniforms -uPointer -value) au av)
-                               [(* (- av 0.5) 2 hover-tilt 0.25) (* (- au 0.5) 2 hover-tilt 0.25) 0.6])
-                             [tx tz th])
+                               ;; lifted a little so the tilted card never dips below the lane
+                               [(* (- av 0.5) 2 hover-tilt 0.25) (* (- au 0.5) 2 hover-tilt 0.25) 0.6 attacked-lift])
+                             [tx tz th ty])
                 rx (approach (.-x tr) tx)
                 rz (approach (.-z tr) tz)
                 ly (approach (.. tilt -position -y) ty)
