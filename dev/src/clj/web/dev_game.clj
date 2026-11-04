@@ -156,6 +156,25 @@
     (game/update-and-send-diffs! (fn [st] (move st (keyword side) card :hand)) (current-lobby))
     (summary)))
 
+;; installed corp cards, ice first
+(defn- installed-corp-cards []
+  (let [servers (get-in @(state) [:corp :servers])]
+    (concat (mapcat :ices (vals servers)) (mapcat :content (vals servers)))))
+
+(defn rez!
+  "Rezzes an installed corp card by (part of its) title, paying its cost."
+  [title]
+  (let [t (str/lower-case title)
+        card (or (some #(when (str/includes? (str/lower-case (:title % "")) t) %) (installed-corp-cards))
+                 (throw (ex-info (str "not installed: " title) {})))]
+    (act! :corp "rez" {:card (card-ref card)})))
+
+(defn- pass-priority!
+  "Both sides press Continue once (runner first, like the client does)."
+  []
+  (act! :runner "continue")
+  (act! :corp "continue"))
+
 ;;; Setup
 
 (defn new-game!
@@ -180,6 +199,23 @@
     ;; command alone records the decision but leaves the prompt open)
     (choose! :corp "Keep")
     (choose! :runner "Keep")))
+
+(declare scenario-run!)
+
+(defn scenario-encounter!
+  "Like scenario-run!, then the run moves on to the outermost ice, the corp
+  rezzes it and the runner encounters it. `step` :approach stops while the
+  ice is still being approached (unrezzed)."
+  ([] (scenario-encounter! :encounter))
+  ([step]
+   (scenario-run!)
+   (pass-priority!)
+   (when (= step :encounter)
+     (let [ice (last (get-in @(state) [:corp :servers :hq :ices]))]
+       (rez! (:title ice))
+       (act! :corp "continue")
+       (act! :runner "continue")))
+   (summary)))
 
 (defn- spend-clicks!
   "Repeats `command` while `side` has clicks left. Stops when a click isn't
@@ -225,14 +261,17 @@
       "new" (new-game! :gateway-type (or (first more) "beginner"))
       "scenario" (case (first more)
                    "run" (scenario-run!)
-                   (str "unknown scenario " (first more) " (available: run)"))
+                   "approach" (scenario-encounter! :approach)
+                   "encounter" (scenario-encounter! :encounter)
+                   (str "unknown scenario " (first more) " (available: run, approach, encounter)"))
       "state" (summary)
       "act" (let [[s command args-edn] more]
               (act! (side s) command (some-> args-edn read-string)))
       "play" (let [[s title server] more] (play! (side s) title server))
       "choose" (let [[s text] more] (choose! (side s) text))
       "tutor" (let [[s title] more] (tutor! (side s) title))
+      "rez" (rez! (first more))
       "end" (end!)
       (str "usage: bin/dev-game new [beginner|intermediate] | scenario run | state"
            " | act <corp|runner> <command> [args-edn] | play <side> <title> [server]"
-           " | choose <side> <text> | tutor <side> <title> | end"))))
+           " | choose <side> <text> | tutor <side> <title> | rez <title> | end"))))

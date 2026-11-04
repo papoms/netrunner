@@ -39,7 +39,14 @@
 (def run-card-lean 0.22)  ; radians
 (def run-card-push 0.14)  ; how far each push moves towards the server
 
-(def mat-thickness 0.03) ; the table is a thin box, like a real playmat
+(def mat-thickness 0.03)
+
+;; the ice the runner is approaching threatens to stand up (its corp-side edge
+;; lifts a little, pivoting on the runner-side edge); the encountered ice turns
+;; from sideways to upright and stands facing the runner to block the run
+(def ice-approach-angle 0.3)  ; radians
+(def ice-encounter-lean 0.3) ; radians the standing ice leans back from vertical
+(def ice-pose-speed 0.09)     ; slower than lerp-factor: standing up takes a moment ; the table is a thin box, like a real playmat
 
 (def highlight-colors
   {:selected "#ffcc00"
@@ -239,6 +246,10 @@
         col-x (fn [i] (* col-w (- i (/ (dec n) 2))))
         run (:run gs)
         run-server (some-> run :server first keyword)
+        run-phase (some-> run :phase keyword)
+        ;; index (from the root) of the ice being approached or encountered
+        run-ice-idx (when (#{:approach-ice :encounter-ice} run-phase)
+                      (dec (or (:position run) 0)))
         corp-cards
         (apply concat
                (for [[i k] (map-indexed vector order)
@@ -263,9 +274,11 @@
                                [(+ x (* 0.22 (if central (inc j) j))) (* 0.002 (inc j)) corp-z] 0))
                            (range) content)
                    (mapcat (fn [j ice]
-                             (with-hosted ice :ice
-                               [x 0 (+ corp-z (* to-center (+ (/ card-h 2) 0.18 (/ card-w 2) (* j ice-step))))]
-                               (/ js/Math.PI 2)))
+                             (cond-> (vec (with-hosted ice :ice
+                                            [x 0 (+ corp-z (* to-center (+ (/ card-h 2) 0.18 (/ card-w 2) (* j ice-step))))]
+                                            (/ js/Math.PI 2)))
+                               (and (= k run-server) (= j run-ice-idx))
+                               (update 0 assoc :ice-pose run-phase :pose-dir to-center)))
                            (range) ices))
                    ;; the attacked server's cards shimmer while the run is on
                    (= k run-server) (map #(cond-> % (:card %) (assoc :under-attack true))))))
@@ -403,7 +416,9 @@
                         :uHolo #js {:value 0}}
          :vertexShader card-vertex-shader
          :fragmentShader card-fragment-shader
-         :transparent true}))
+         :transparent true
+         ;; standing ice turns its face to the runner, so the corp sees its back
+         :side THREE/DoubleSide}))
 
 ;;; Attack lane: a calm animated strip under the attacked column during a run:
 ;;; soft light streaks gliding towards the server and a few drifting particles. u runs across the lane, v along it (0 = runner side, 1 = server).
@@ -488,6 +503,8 @@
         ;; the hovered card tilts inside its group, so the group's own
         ;; rotation (e.g. sideways ice) stays untouched
         ^js tilt (THREE/Group.)
+        ;; between the two: standing up approached / encountered ice
+        ^js pose (THREE/Group.)
         ^js front (plane card-w card-h (card-front-material))
         ^js glow (plane (+ card-w 0.08) (+ card-h 0.08)
                     (THREE/MeshBasicMaterial. #js {:color "#ffffff" :transparent true :opacity 0.85}))
@@ -499,7 +516,8 @@
     (.add tilt glow)
     (.add tilt front)
     (.add tilt overlay)
-    (.add group tilt)
+    (.add pose tilt)
+    (.add group pose)
     (when pile
       (let [^js box (THREE/Mesh. (THREE/BoxGeometry. card-w 1 card-h)
                              (THREE/MeshBasicMaterial. #js {:color "#1b1b1f"}))]
@@ -513,13 +531,14 @@
       (.add group shadow)
       (set! (.. group -userData -shadow) shadow))
     (set! (.. group -userData -tilt) tilt)
+    (set! (.. group -userData -pose) pose)
     (set! (.. group -userData -front) front)
     (set! (.. front -userData -card-group) group) ; for raycast hits
     (set! (.. group -userData -glow) glow)
     (set! (.. group -userData -overlay) overlay)
     group))
 
-(defn- update-card-object! [^js group {:keys [url highlight badges strength pile count pos rot float push-dir under-attack] :as entry}]
+(defn- update-card-object! [^js group {:keys [url highlight badges strength pile count pos rot float push-dir under-attack ice-pose pose-dir] :as entry}]
   (let [^js ud (.-userData group)
         ^js front (.-front ud)
         ^js glow (.-glow ud)
@@ -533,6 +552,8 @@
     (when (nil? (.-seed ud))
       (set! (.-seed ud) (* 100 (js/Math.random))))
     (set! (.-pushDir ud) (or push-dir 0))
+    (set! (.-icePose ud) (some-> ice-pose name))
+    (when pose-dir (set! (.-poseDir ud) pose-dir))
     (set! (.-visible shadow) (boolean float))
     ;; the shadow lies on the table below the floating card
     (set! (.. shadow -position -y) (+ (- y) 0.004))
@@ -648,6 +669,68 @@
     target
     (+ v (* lerp-factor (- target v)))))
 
+(def ^:private z-axis (THREE/Vector3. 0 0 1))
+(def ^:private y-axis (THREE/Vector3. 0 1 0))
+(def ^:private pose-q (THREE/Quaternion.))
+(def ^:private sway-q (THREE/Quaternion.))
+(def ^:private lean-q (THREE/Quaternion.))
+(def ^:private pose-v (THREE/Vector3.))
+(def ^:private pose-m (THREE/Matrix4.))
+
+(defn- ice-pose-target!
+  "Sets pose-q / pose-v to where the ice's pose group should be. All in the ice
+  group's frame, which is turned a quarter: local +x points to world -z, local
+  +z to world +x. `dir` is +1 when the runner sits on the world +z side."
+  [kind dir s]
+  (let [half (/ card-w 2)]
+    (case kind
+      ;; rotate about the card's long axis by dir*a: the corp-side edge lifts,
+      ;; the offset keeps the runner-side edge (local x = -dir*half) on the table
+      "approach-ice"
+      (let [a (+ ice-approach-angle (* 0.05 (js/Math.sin (* s 2.4))))]
+        (.setFromAxisAngle pose-q z-axis (* dir a))
+        (.set pose-v (* (- dir) half (- 1 (js/Math.cos a))) (* half (js/Math.sin a)) 0))
+      ;; upright and readable: the card's right goes to world +x*dir (local
+      ;; +z*dir), its face to the runner (local -x*dir), its top up (the card's
+      ;; top is its local -z, so local +z maps down). Then a slight sway.
+      "encounter-ice"
+      (do (.set pose-m
+                0 (- dir) 0 0
+                0 0 -1 0
+                dir 0 0 0
+                0 0 0 1)
+          (.setFromRotationMatrix pose-q pose-m)
+          ;; lean back: the top tips towards the corp (local +x*dir)
+          (.premultiply pose-q (.setFromAxisAngle lean-q z-axis (* (- dir) ice-encounter-lean)))
+          (.premultiply pose-q (.setFromAxisAngle sway-q y-axis
+                                                  (+ (* 0.07 (js/Math.sin (* s 1.6)))
+                                                     (* 0.03 (js/Math.sin (+ (* s 4.1) 0.8))))))
+          ;; the bottom edge stays put while the card leans back
+          (let [hh (/ card-h 2)]
+            (.set pose-v
+                  (+ (* (- dir) 0.12) (* dir hh (js/Math.sin ice-encounter-lean)))
+                  (+ (* hh (js/Math.cos ice-encounter-lean)) 0.01 (* 0.012 (js/Math.sin (* s 2.2))))
+                  0)))
+      (do (.identity pose-q)
+          (.set pose-v 0 0 0)))))
+
+(defn- pose-ice!
+  "Glides approached / encountered ice towards its pose, and back flat afterwards."
+  [^js obj now moving]
+  (let [^js ud (.-userData obj)
+        ^js pose (.-pose ud)
+        kind (.-icePose ud)
+        ^js q (.-quaternion pose)
+        ^js p (.-position pose)]
+    ;; nothing to do for the many cards lying flat
+    (when (or kind (not= 1 (.-w q)) (not (zero? (.lengthSq p))))
+      (ice-pose-target! kind (or (.-poseDir ud) 1) (+ now (or (.-seed ud) 0)))
+      (if (and (nil? kind) (< (.angleTo q pose-q) 0.001) (< (.distanceTo p pose-v) 0.0005))
+        (do (.identity q) (.set p 0 0 0))
+        (do (.slerp q pose-q ice-pose-speed)
+            (.lerp p pose-v ice-pose-speed)))
+      (vreset! moving true))))
+
 (defn- lerp-objects!
   "Glides every card towards its target position, and the hovered card towards
   its tilt and holo state. Returns true while anything is still moving."
@@ -667,6 +750,7 @@
             (vreset! moving true)
             (.set p x y z)
             (set! (.-y r) ry))))
+      (pose-ice! obj now moving)
       ;; hover: the side under the pointer comes up towards the viewer, and the
       ;; holo shine follows the pointer (uv: u right, v up; the card's top is -z)
       (let [^js ud (.-userData obj)

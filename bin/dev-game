@@ -3,11 +3,14 @@
 
     bin/dev-game new [beginner|intermediate]   fresh System Gateway game, hands kept
     bin/dev-game scenario run                  ... played up to a live run (Jailbreak on HQ)
+    bin/dev-game scenario approach             ... run moved on to approach HQ's outer ice
+    bin/dev-game scenario encounter            ... that ice rezzed and encountered
     bin/dev-game state                         short summary
     bin/dev-game act <corp|runner> <command> [args-edn]
     bin/dev-game play <side> <title> [server]
     bin/dev-game choose <side> <text>
     bin/dev-game tutor <side> <title>          move a card from deck to hand (dev cheat)
+    bin/dev-game rez <title>                   rez an installed corp card
     bin/dev-game end                           close the dev game
 
 Browsers: http://localhost:1042/play?dev-login=devrunner (or devcorp)
