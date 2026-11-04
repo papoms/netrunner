@@ -17,7 +17,8 @@
    [game.core.card :refer [active? faceup? get-counters has-subtype? ice?]]
    [jinteki.i18n :refer [tr tr-span]]
    [nr.gameboard.board :as board]
-   [nr.gameboard.card-preview :refer [put-game-card-in-channel zoom-channel]]
+   [nr.gameboard.card-preview :refer [clear-zoom-pointer! put-game-card-in-channel
+                                      set-zoom-pointer! zoom-channel]]
    [nr.gameboard.state :refer [game-state]]
    [reagent.core :as r]))
 
@@ -445,7 +446,7 @@
     @moving))
 
 (defn- card-at
-  "The card entry under the pointer, or nil."
+  "The card entry under the pointer (with :uv, where on the card it was hit), or nil."
   [{:keys [^js renderer ^js camera objects ^js raycaster]} ^js e]
   (let [rect (.getBoundingClientRect (.-domElement renderer))
         ndc (THREE/Vector2. (- (* 2 (/ (- (.-clientX e) (.-left rect)) (.-width rect))) 1)
@@ -455,8 +456,10 @@
                              (.. obj -userData -front)))]
     (.setFromCamera raycaster ndc camera)
     (when-let [^js hit (first (.intersectObjects raycaster fronts false))]
-      (let [entry (.. hit -object -parent -userData -entry)]
-        (when (:card entry) entry)))))
+      (let [entry (.. hit -object -parent -userData -entry)
+            ^js uv (.-uv hit)]
+        (when (:card entry)
+          (assoc entry :uv (when uv [(.-x uv) (.-y uv)])))))))
 
 (defn- create-context
   "Creates renderer, scene, camera and controls in `container`. Returns nil if WebGL is unavailable."
@@ -611,14 +614,22 @@
                 (board/close-card-menu)))))
         on-pointer-move
         (fn [^js e]
-          (let [{:keys [card back?] :as entry} (card-at @ctx e)
-                id (:id entry)]
+          (let [{:keys [card back? uv] :as entry} (card-at @ctx e)
+                id (:id entry)
+                zoomable (and card (may-zoom? card back?))]
             (when (not= id @hovered)
               (reset! hovered id)
-              (if (and card (may-zoom? card back?))
+              (if zoomable
                 (put-game-card-in-channel card zoom-channel)
-                (put! zoom-channel false)))))
-        on-pointer-leave (fn [_] (reset! hovered nil) (put! zoom-channel false))
+                (put! zoom-channel false)))
+            ;; drives the holo effect on the zoomed card (UV v points up, screen y down)
+            (if (and zoomable uv)
+              (set-zoom-pointer! (first uv) (- 1 (second uv)))
+              (clear-zoom-pointer!))))
+        on-pointer-leave (fn [_]
+                           (reset! hovered nil)
+                           (put! zoom-channel false)
+                           (clear-zoom-pointer!))
         animate (fn animate []
                   (when-let [c @ctx]
                     (let [synced (when @dirty
