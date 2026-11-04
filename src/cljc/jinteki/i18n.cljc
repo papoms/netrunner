@@ -91,6 +91,9 @@
          resource (if (vector? resource) resource [resource])
          [raw-id fallback] resource
          id (name raw-id)
+         ;; fluent.js rejects nil variable values (e.g. :server-n for central
+         ;; servers), even in variants that don't use them
+         params (when params (into {} (remove (comp nil? val)) params))
          bundle (get-bundle lang)
          target-translation (get-translation bundle id params)]
      (cond
@@ -225,9 +228,18 @@
           (-> (swap! server-names assoc-in [lang server-name] tr)
               (get-in [lang server-name]))))))
 
+(defn- keywordize-zones
+  "Game state reaches the client as JSON, which turns keyword values like
+  [:servers :hq :ices] into strings. card-str-edn needs keyword zones,
+  including on host cards."
+  [card]
+  (cond-> card
+    (sequential? (:zone card)) (update :zone #(mapv keyword %))
+    (map? (:host card)) (update :host keywordize-zones)))
+
 (defn format-card-str
   [card]
-  (let [m (card-str-edn card)]
+  (let [m (card-str-edn (keywordize-zones card))]
     (tr (:card/str m) m)))
 
 (defonce damage-names (atom {}))
