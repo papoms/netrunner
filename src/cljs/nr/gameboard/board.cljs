@@ -23,6 +23,7 @@
                                       card-preview-mouse-over clear-zoom-pointer!
                                       put-game-card-in-channel track-zoom-pointer! zoom-channel]]
    [nr.gameboard.holo :refer [holo-card]]
+   [nr.gameboard.layout-experiments :as layout-x]
    [nr.gameboard.log :as game-log :refer [find-matches reset-completions]]
    [nr.gameboard.player-stats :refer [stat-controls stats-view]]
    [nr.gameboard.replay :refer [replay-panel]]
@@ -2517,7 +2518,8 @@
                              (when (and (not= @side :spectator) @card-hover-movement) :card-hover-movement)
                              (when (and @board-3d @board-3d-full-width) :board3d-full)
                              (when @labeled-unrezzed-cards :show-unrezzed-card-labels)
-                             (when @labeled-cards :show-card-labels)]
+                             (when @labeled-cards :show-card-labels)
+                             (layout-x/gameboard-classes)]
                      :style (card-colors-custom-style {:card-colors @card-colors
                                                        :card-custom-colors @card-custom-colors})}
                (let [me-keep (r/cursor game-state [me-side :keep])
@@ -2541,6 +2543,7 @@
                                   {})}]
 
                [:div.right-pane
+                [layout-x/right-pane-pin]
                 [card-zoom-view zoom-card]
 
                 (if (:replay @game-state)

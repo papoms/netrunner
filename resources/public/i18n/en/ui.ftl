@@ -779,6 +779,8 @@ game_trash-like-cards = Offer to trash like cards
 
 game_trash-resource = Trash Resource
 
+game_ui-x-pin-panel = Keep the panel open
+game_ui-x-unpin-panel = Let the panel slide away
 game_unbeatable = Make unbeatable
 
 game_unimplemented = Unimplemented
@@ -1810,6 +1812,7 @@ settings_stacked-cards = Card stacking (on by default)
 
 settings_toggle-log-timestamps = Show log timestamps
 
+settings_ui-experiments = Experimental interface (e.g. the right panel slides in from the screen edge)
 settings_update = Update
 
 settings_update-profile = Update Profile

@@ -832,6 +832,12 @@
                              :checked (:card-zoom-holo @s)
                              :on-change #(swap! s assoc :card-zoom-holo (.. % -target -checked))}]
              [tr-span [:settings_card-zoom-holo "Holo effect on zoomed cards (tilts and shines as you move over a card)"]]]]
+           [:div
+            [:label [:input {:type "checkbox"
+                             :name "ui-experiments"
+                             :checked (:ui-experiments @s)
+                             :on-change #(swap! s assoc :ui-experiments (.. % -target -checked))}]
+             [tr-span [:settings_ui-experiments "Experimental interface (e.g. the right panel slides in from the screen edge)"]]]]
            [:br]
            [:div
             [tr-span [:settings_board-3d-playmat "Playmat image for the 3D board (URL, Corp half on the left, Runner half on the right; empty for the plain table)"]]
@@ -849,7 +855,7 @@
         state (r/atom
                (-> (:options @app-state)
                    (select-keys [:pronouns :bespoke-sounds :language :card-language :sounds :default-format
-                                 :card-unplayable-fade-out :card-hover-movement :board-3d :board-3d-playmat :board-3d-full-width
+                                 :card-unplayable-fade-out :card-hover-movement :board-3d :board-3d-playmat :board-3d-full-width :ui-experiments
                                  :lobby-sounds :sounds-volume :background :custom-bg-url :card-zoom
                                  :pin-zoom :card-zoom-holo :show-alt-art :card-resolution :pass-on-rez
                                  :auto-select-default-deck-casual :auto-select-default-deck-tournament

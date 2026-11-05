@@ -219,6 +219,11 @@
     :sync? false  ; device-specific, like :board-3d
     :validate-fn boolean?
     :doc "The 3D board spans the whole width; the side panels float above it"}
+   {:key :ui-experiments
+    :default false
+    :sync? false  ; device-specific: layout tweaks depend on the screen
+    :validate-fn boolean?
+    :doc "Experimental interface tweaks for the game board (see nr.gameboard.layout-experiments)"}
    {:key :board-3d-playmat
     :default ""
     :sync? false  ; device-specific, like :board-3d
