@@ -546,6 +546,7 @@ game_beat-trace = Beat Trace
 game_board-3d-loading = Loading 3D board...
 
 game_board-3d-unavailable = The 3D board could not be started (WebGL is not available). Disable it in the settings to use the regular board.
+game_board-3d-reset-view = Reset view (or double-click the table)
 
 game_brain-damage = {NUMBER($dmg)} Core Damage
 

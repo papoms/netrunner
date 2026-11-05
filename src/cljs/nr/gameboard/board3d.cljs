@@ -40,6 +40,7 @@
 (def run-card-push 0.14)  ; how far each push moves towards the server
 
 (def mat-thickness 0.03)
+(def max-polar 1.35) ; how flat the camera may look across the table (radians from straight down)
 
 ;; the opponent's hand: backs fanned at the far edge of the mat, smaller
 (def opp-hand-z 4.5)       ; distance of the fan's middle (lying flat) from the table centre
@@ -652,7 +653,8 @@
 (def hand-card-height 0.36) ; share of the view's height
 (def hand-hover-scale 1.2)
 (def hand-max-angle 0.07)   ; radians between neighbours
-(def hand-max-spread 0.75)  ; share of the view's width the fan may use
+(def hand-max-spread 0.85)  ; share of the free area's width the fan may use
+(def hand-min-fit-scale 0.6) ; a narrow free area shrinks the cards, but not below this
 (def hand-speed 0.25)
 ;; a played card first rises from the hand to hang big over the board, then
 ;; drops to its place; while a decision about it is open it stays up there
@@ -1427,17 +1429,24 @@
 (def ^:private z-unit (THREE/Vector3. 0 0 1))
 
 (defn- hand-frame
-  "Where the hand goes this frame, in camera space: the visible view's bottom
-  centre, its width and height at hand-distance (the view may be offset, so
-  this unprojects instead of assuming the camera's axis)."
-  [^js camera]
+  "Where the hand goes this frame, in camera space: the view's bottom centre and
+  height at hand-distance, and the width of the free area (the part of the
+  canvas not covered by the side panels, see free-area), which limits how wide
+  the fan may get. The view may be offset, so this unprojects instead of
+  assuming the camera's axis."
+  [^js camera [w _ free-left free-w]]
   (let [at (fn [nx ny]
              (let [^js v (.applyMatrix4 (THREE/Vector3. nx ny 0.5) (.-projectionMatrixInverse camera))]
                (.multiplyScalar v (/ hand-distance (- (.-z v))))))
+        ;; the free area's edges in normalized device coordinates (-1..1 across the canvas)
+        [nl nr] (if (and w free-w (pos? w))
+                  [(dec (* 2 (/ free-left w))) (dec (* 2 (/ (+ free-left free-w) w)))]
+                  [-1 1])
+        ;; centred like the view; only the width comes from the free area
         ^js bottom (at 0 -1)
         ^js top (at 0 1)
-        ^js right (at 1 -1)
-        ^js left (at -1 -1)]
+        ^js right (at nr -1)
+        ^js left (at nl -1)]
     {:x (.-x bottom) :y (.-y bottom)
      :w (- (.-x right) (.-x left))
      :h (- (.-y top) (.-y bottom))}))
@@ -1449,8 +1458,12 @@
   (let [^js ud (.-userData obj)
         n (.-handCount ud)
         i (.-handIndex ud)
-        s (* (/ (* hand-card-height h) card-h)       ; card scale
-             (max hand-min-scale (min 1 (/ hand-full-size-cards (max 1 n)))))
+        s0 (* (/ (* hand-card-height h) card-h)      ; card scale
+              (max hand-min-scale (min 1 (/ hand-full-size-cards (max 1 n)))))
+        ;; a narrow free area: shrink the cards so the fan (at its tightest
+        ;; overlap) still fits, within reason
+        tight-w (* s0 card-w (+ 1 (* 0.32 (max 0 (dec n)))))
+        s (* s0 (max hand-min-fit-scale (min 1 (/ (* hand-max-spread w) tight-w))))
         cw (* s card-w)
         ;; a bigger hand is held tighter: more overlap per card
         overlap (+ 0.32 (* 0.3 (max 0 (min 1 (/ (- 12 n) 7)))))  ; 0.62 up to 5 cards, 0.32 from 12
@@ -1500,15 +1513,17 @@
     (let [k (+ (.-x sv) (* hand-speed (- s (.-x sv))))] (.set sv k k k))
     true))
 
+(declare glide-camera!)
+
 (defn- lerp-objects!
   "Glides every card towards its target position, and the hovered card towards
   its tilt and holo state. Returns true while anything is still moving."
-  [{:keys [objects ^js run-marker ^js run-lane hover inspect ^js camera ^js scene ^js tokens token-hover]}]
+  [{:keys [objects ^js run-marker ^js run-lane hover inspect ^js camera ^js scene ^js tokens token-hover view] :as ctx}]
   (let [moving (volatile! false)
         now (/ (js/performance.now) 1000) ; seconds, for the run card's animation
         {hover-id :id [hu hv] :uv} @hover
         inspect-id @inspect
-        hand (hand-frame camera)]
+        hand (hand-frame camera (:layout @view))]
     (doseq [[id ^js obj] (es6-iterator-seq (.entries objects))]
       (cond
         (.. obj -userData -inHand)
@@ -1630,6 +1645,8 @@
       (set! (.. run-lane -material -uniforms -uTime -value) now)
       (vreset! moving true))
     (lerp-tokens! tokens @token-hover moving)
+    (when (glide-camera! ctx)
+      (vreset! moving true))
     @moving))
 
 (defn- card-at
@@ -1704,11 +1721,16 @@
       (set! (.-visible run-lane) false)
       (.add scene run-lane)
       (set! (.-enableDamping controls) true)
-      (set! (.-maxPolarAngle controls) 1.35)
+      (set! (.-maxPolarAngle controls) max-polar)
       (set! (.-minDistance controls) 2)
+      ;; left-drag orbits around the point under the cursor (see orbit-by!), so
+      ;; the controls only pan (right-drag) and zoom, towards the cursor
+      (set! (.-enableRotate controls) false)
+      (set! (.-zoomToCursor controls) true)
       (let [view (atom {:user-moved false :aspect 1 :bounds nil})]
-        ;; stop auto-framing as soon as the player rotates, pans or zooms
-        (.addEventListener controls "start" #(swap! view assoc :user-moved true))
+        ;; stop auto-framing as soon as the player rotates, pans or zooms, and
+        ;; stop a running reset glide
+        (.addEventListener controls "start" #(swap! view assoc :user-moved true :camera-goal nil))
         {:renderer renderer :scene scene :camera camera :controls controls
          :objects (js/Map.) :labels (js/Map.) :tokens (js/Map.) :token-counts (js/Map.) :token-hover (atom nil) :run-marker run-marker :run-lane run-lane
          :table table :table-top table-top :table-edge table-edge
@@ -1756,12 +1778,12 @@
 
 (def camera-elevation (* 58 (/ js/Math.PI 180)))
 
-(defn- fit-camera!
-  "Places the camera (seen from the player's side, +z) so all cards on the table fit the pane.
-  Does nothing once the player has moved the camera themselves."
-  [{:keys [^js camera ^js controls view]}]
-  (let [{:keys [user-moved aspect bounds]} @view]
-    (when (and bounds (not user-moved))
+(defn- camera-goal
+  "[target-x target-z camera-x camera-y camera-z max-distance] that frames all
+  cards on the table in the free area, seen from the player's side (+z)."
+  [{:keys [^js camera view]}]
+  (let [{:keys [aspect bounds]} @view]
+    (when bounds
       (let [[min-x max-x min-z max-z] bounds
             cx (/ (+ min-x max-x) 2)
             ;; nudged towards the player: perspective makes the near side look bigger
@@ -1772,10 +1794,114 @@
             hfov (js/Math.atan (* (js/Math.tan vfov) aspect))
             d (* 1.15 (max (/ hw (js/Math.tan hfov))
                            (/ (* hd (js/Math.sin camera-elevation)) (js/Math.tan vfov))))]
-        (.set (.-target controls) cx 0 cz)
-        (.set (.-position camera) cx (* d (js/Math.sin camera-elevation)) (+ cz (* d (js/Math.cos camera-elevation))))
-        (set! (.-maxDistance controls) (* 2 d))
-        (.update controls)))))
+        [cx cz cx (* d (js/Math.sin camera-elevation)) (+ cz (* d (js/Math.cos camera-elevation))) (* 2 d)]))))
+
+(defn- fit-camera!
+  "Places the camera so all cards on the table fit the pane.
+  Does nothing once the player has moved the camera themselves."
+  [{:keys [^js camera ^js controls view] :as ctx}]
+  (when-not (:user-moved @view)
+    (when-let [[tx tz px py pz max-d] (camera-goal ctx)]
+      (.set (.-target controls) tx 0 tz)
+      (.set (.-position camera) px py pz)
+      (set! (.-maxDistance controls) max-d)
+      (.update controls))))
+
+(defn- stop-coasting! [{:keys [view]}] (swap! view dissoc :orbit-coast))
+
+(defn- reset-view!
+  "Back to the automatic framing (which follows the cards again), gliding there."
+  [{:keys [^js controls view] :as ctx}]
+  (swap! view assoc :user-moved false)
+  (stop-coasting! ctx)
+  (when-let [[_ _ _ _ _ max-d :as goal] (camera-goal ctx)]
+    (set! (.-maxDistance controls) max-d)
+    (swap! view assoc :camera-goal goal)))
+
+(declare orbit-by!)
+
+(def orbit-damping 0.85) ; per frame: how much of a released drag's spin carries on
+(def orbit-coast-start 0.35) ; share of the last drag speed the coast starts with (a gentle drift)
+
+(defn- coast-orbit!
+  "After a drag is released the camera keeps turning a little, slowing down
+  (like the controls' own damping for pan and zoom). Returns true while turning."
+  [{:keys [view] :as ctx}]
+  (when-let [{:keys [pivot vx vy h]} (:orbit-coast @view)]
+    (if (< (+ (js/Math.abs vx) (js/Math.abs vy)) 0.05)
+      (do (swap! view dissoc :orbit-coast) false)
+      (do (orbit-by! ctx pivot vx vy h)
+          (swap! view assoc :orbit-coast {:pivot pivot :h h
+                                          :vx (* vx orbit-damping) :vy (* vy orbit-damping)})
+          true))))
+
+(defn- glide-camera!
+  "Moves the camera a step towards a pending reset goal. Returns true while gliding."
+  [{:keys [^js camera ^js controls view] :as ctx}]
+  (or (coast-orbit! ctx)
+  (when-let [[tx tz px py pz] (:camera-goal @view)]
+    (let [^js t (.-target controls)
+          ^js p (.-position camera)
+          k 0.15]
+      (.set t (+ (.-x t) (* k (- tx (.-x t)))) (* (- 1 k) (.-y t)) (+ (.-z t) (* k (- tz (.-z t)))))
+      (.set p (+ (.-x p) (* k (- px (.-x p)))) (+ (.-y p) (* k (- py (.-y p)))) (+ (.-z p) (* k (- pz (.-z p)))))
+      (when (< (+ (js/Math.abs (- px (.-x p))) (js/Math.abs (- py (.-y p))) (js/Math.abs (- pz (.-z p)))
+                  (js/Math.abs (- tx (.-x t))) (js/Math.abs (- tz (.-z t))))
+               0.002)
+        (.set t tx 0 tz)
+        (.set p px py pz)
+        (swap! view assoc :camera-goal nil))
+      true))))
+
+(def ^:private table-plane (THREE/Plane. (THREE/Vector3. 0 1 0) 0))
+(def ^:private orbit-q (THREE/Quaternion.))
+(def ^:private orbit-qp (THREE/Quaternion.))
+(def ^:private orbit-v (THREE/Vector3.))
+(def ^:private orbit-right (THREE/Vector3.))
+(def ^:private world-up (THREE/Vector3. 0 1 0))
+
+(defn- orbit-pivot
+  "The point on the table under the pointer, or (pointing off the table or
+  near the horizon) the controls' current target."
+  [{:keys [^js renderer ^js camera ^js controls ^js raycaster]} ^js e]
+  (let [rect (.getBoundingClientRect (.-domElement renderer))
+        ndc (THREE/Vector2. (- (* 2 (/ (- (.-clientX e) (.-left rect)) (.-width rect))) 1)
+                            (+ (* -2 (/ (- (.-clientY e) (.-top rect)) (.-height rect))) 1))
+        ^js hit (THREE/Vector3.)
+        ^js target (.-target controls)]
+    (.setFromCamera raycaster ndc camera)
+    (if (and (.intersectPlane (.-ray raycaster) table-plane hit)
+             ;; much further away than the current centre: a grazing view, keep the centre
+             (< (.distanceTo hit (.-position camera)) (* 3 (.distanceTo target (.-position camera)))))
+      hit
+      (.clone target))))
+
+(defn- orbit-by!
+  "Turns the camera around `pivot` (a point on the table) for a pointer move of
+  dx, dy pixels: left/right around the vertical axis, up/down over the
+  camera's right axis. The controls' target turns along, so the camera keeps
+  looking where it looked and the pivot stays under the pointer."
+  [{:keys [^js camera ^js controls view]} ^js pivot dx dy height]
+  (let [speed (/ (* 2 js/Math.PI) (max 1 height))
+        ^js target (.-target controls)
+        ^js pos (.-position camera)]
+    (.setFromAxisAngle orbit-q world-up (- (* dx speed)))
+    ;; tilt only while the camera stays between straight down and max-polar
+    (-> (.set orbit-right 1 0 0) (.applyQuaternion (.-quaternion camera)))
+    (set! (.-y orbit-right) 0)
+    (when (> (.lengthSq orbit-right) 1e-6)
+      (.normalize orbit-right)
+      (.setFromAxisAngle orbit-qp orbit-right (- (* dy speed)))
+      (let [^js q (.multiplyQuaternions (THREE/Quaternion.) orbit-q orbit-qp)
+            ^js off (-> (.subVectors orbit-v pos target) (.applyQuaternion q))
+            polar (js/Math.acos (/ (.-y off) (max 1e-6 (.length off))))]
+        (when (< 0.12 polar max-polar)
+          (.copy orbit-q q))))
+    (doseq [^js v [pos target]]
+      (-> (.subVectors orbit-v v pivot) (.applyQuaternion orbit-q) (.add pivot))
+      (.copy v orbit-v))
+    (.premultiply (.-quaternion camera) orbit-q)
+    (swap! view assoc :user-moved true :camera-goal nil)))
 
 (defn- card-bounds
   "[min-x max-x min-z max-z] of all card positions, padded for card size and labels."
@@ -1894,7 +2020,43 @@
                       (set-inspect! nil)))
         on-blur (fn [_] (set-inspect! nil))
         watch-key (keyword (gensym "board3d"))
-        on-pointer-down (fn [^js e] (reset! down-pos [(.-clientX e) (.-clientY e)]))
+        orbit (atom nil) ; {:pivot :x :y} while left-dragging
+        reset-pos (r/atom nil) ; [left top] of the reset-view button, in the free area
+        on-pointer-down (fn [^js e]
+                          (reset! down-pos [(.-clientX e) (.-clientY e)])
+                          (when (and (= 0 (.-button e)) @ctx
+                                     (not (or (.-shiftKey e) (.-ctrlKey e) (.-metaKey e))))
+                            (stop-coasting! @ctx)
+                            (reset! orbit {:pivot (orbit-pivot @ctx e) :x (.-clientX e) :y (.-clientY e)
+                                           :vx 0 :vy 0 :t (js/performance.now)})
+                            (.setPointerCapture (.-target e) (.-pointerId e))))
+        on-orbit-move (fn [^js e]
+                        (when-let [{:keys [pivot x y]} @orbit]
+                          (when (pos? (bit-and (.-buttons e) 1))
+                            (let [dx (- (.-clientX e) x)
+                                  dy (- (.-clientY e) y)]
+                              (when (or (not= 0 dx) (not= 0 dy))
+                                ;; smoothed speed, for the coast after release
+                                (swap! orbit (fn [o] (assoc o :x (.-clientX e) :y (.-clientY e)
+                                                              :vx (+ (* 0.5 (:vx o)) (* 0.5 dx))
+                                                              :vy (+ (* 0.5 (:vy o)) (* 0.5 dy))
+                                                              :h (.-clientHeight (.-target e))
+                                                              :t (js/performance.now))))
+                                (orbit-by! @ctx pivot dx dy (.-clientHeight (.-target e))))))))
+        on-orbit-end (fn [_]
+                       (when-let [{:keys [pivot vx vy h t]} @orbit]
+                         ;; still moving when let go (not held still first): coast on
+                         (when (and h (< (- (js/performance.now) t) 80))
+                           (let [clamp #(max -25 (min 25 (* orbit-coast-start %)))]
+                             (swap! (:view @ctx) assoc :orbit-coast {:pivot pivot :vx (clamp vx) :vy (clamp vy) :h h}))))
+                       (reset! orbit nil))
+        on-dblclick (fn [^js e]
+                      ;; on empty table: back to the automatic view
+                      (when (and @ctx (not (card-at @ctx e)))
+                        (reset-view! @ctx)))
+        place-reset-button! (fn [c]
+                              (when-let [[_ _ free-left free-w] (:layout @(:view c))]
+                                (reset! reset-pos [(+ free-left free-w -44) 8])))
         on-pointer-up
         (fn [^js e]
           (when-let [[x0 y0] @down-pos]
@@ -1962,11 +2124,16 @@
              ;; dev builds: lets the console (and dev tooling) inspect the scene
              (when ^boolean goog.DEBUG (set! (.-__board3d js/window) c))
              (resize! c el)
-             (reset! resize-observer (js/ResizeObserver. #(resize! c el)))
+             (reset! resize-observer (js/ResizeObserver. #(do (resize! c el) (place-reset-button! c))))
+             (place-reset-button! c)
              (.observe @resize-observer el)
              ;; the free area (central pane) can change size on its own
              (some->> (.closest el ".centralpane") (.observe @resize-observer))
              (.addEventListener canvas "pointerdown" on-pointer-down)
+             (.addEventListener canvas "pointermove" on-orbit-move)
+             (.addEventListener canvas "pointerup" on-orbit-end)
+             (.addEventListener canvas "pointercancel" on-orbit-end)
+             (.addEventListener canvas "dblclick" on-dblclick)
              (.addEventListener canvas "pointerup" on-pointer-up)
              (.addEventListener canvas "pointermove" on-pointer-move)
              (.addEventListener canvas "pointerleave" on-pointer-leave)
@@ -1994,6 +2161,12 @@
          ;; .menu-container keeps the global click handler from closing card menus
          [:div.board3d.menu-container {:ref #(reset! container %)}
           [:div.board3d-canvas {:ref #(reset! canvas-holder %)}]
+          (when-let [[left top] @reset-pos]
+            [:button.board3d-reset-view
+             {:style {:left (str left "px") :top (str top "px")}
+              :title (tr [:game_board-3d-reset-view "Reset view (or double-click the table)"])
+              :on-click #(some-> @ctx reset-view!)}
+             "⟲"])
           (when @failed
             [:div.board3d-message [tr-span [:game_board-3d-unavailable "The 3D board could not be started (WebGL is not available). Disable it in the settings to use the regular board."]]])
           [menu-overlay menu-pos]])})))
