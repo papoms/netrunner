@@ -1,3 +1,26 @@
+## Playing on jinteki.net with this client (3D board)
+
+This branch (`3d-on-v171`) is the 3D board on top of v171, the version
+jinteki.net runs (its page loads `/js/main.js?v=v171`). The idea: jinteki.net
+stays the server; only the client code comes from your machine.
+
+1. Build once (and after every change): `bin/build-3d-client`
+   (release build into `resources/release-3d/`, in a throwaway container).
+2. Serve it: `bin/serve-3d-client` (http://localhost:8000; keep it running).
+3. Browser extension [Requestly](https://requestly.com) (Firefox or Chrome),
+   one Redirect rule:
+   - Request URL, *Matches (RegEx)*:
+     `^https://jinteki\.net/(js/(main|board3d)\.js|css/netrunner\.css)`
+   - Redirect to: `http://localhost:8000/$1`
+4. Open https://jinteki.net, Settings → "Experimental 3D version": tick
+   "3D game board" (and optionally full width / experimental interface), Update
+   Profile. For a playmat use a full URL such as
+   `http://localhost:8000/img/playmats/<file>.jpg`.
+
+Switch the Requestly rule off to get the regular client back. When jinteki.net
+moves to a new version (check the `?v=` on main.js), the port has to be redone
+on that tag. Don't report bugs seen with this client to the jinteki team.
+
 ## Test games without clicking (dev only)
 
 With the dev server running (`bin/up`), `bin/dev-game` sets up and drives a

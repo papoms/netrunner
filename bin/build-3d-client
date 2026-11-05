@@ -1,0 +1,17 @@
+#!/usr/bin/env sh
+# Builds the client of this branch (optimized release build) into
+# resources/release-3d/, for use against jinteki.net (see bin/serve-3d-client
+# and docs in DEVELOPMENT.md). Runs in a throwaway container, so the running
+# dev watchers and their output in resources/public/ are not touched.
+set -eu
+
+cd "$(dirname "$0")/.."
+mkdir -p resources/release-3d/js resources/release-3d/css
+
+docker compose run --rm --no-deps --entrypoint "" cljs sh -c '
+  npx shadow-cljs release app --config-merge "{:output-dir \"resources/release-3d/js\"}" &&
+  npx stylus -c -o resources/release-3d/css/ src/css/netrunner.styl'
+
+echo
+echo "Built:"
+ls -la resources/release-3d/js/*.js resources/release-3d/css/netrunner.css
