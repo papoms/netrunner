@@ -16,8 +16,6 @@ ui-x-speed = 0.25s
         right: 0
         bottom: 0
         z-index: 40
-        background: rgba(8, 10, 14, 0.88)
-        box-shadow: -6px 0 18px rgba(0, 0, 0, 0.5)
         // 14px = ui-x-edge (Stylus doesn't substitute variables inside calc())
         transform: translateX(calc(100% - 14px))
         // leaving: wait a moment, so a brief slip of the pointer doesn't close it
@@ -42,6 +40,25 @@ ui-x-speed = 0.25s
 
             &::before
                 opacity: 0
+
+        .content-pane
+            background: rgba(8, 10, 14, 0.88)
+            box-shadow: -6px 0 18px rgba(0, 0, 0, 0.5)
+
+    // the card preview floats freely: only the log/chat below it gets a
+    // background (also overrides the full-width 3D board's panel background)
+    .right-pane
+        background: transparent
+
+        // the zoomed card's frame (.card-preview.blue-shade) has its own tinted
+        // background around the card: let the card stand on its own
+        .card-zoom .card-preview
+            background: transparent
+            border-color: transparent
+            box-shadow: none
+
+        .content-pane
+            background: rgba(8, 10, 14, 0.55)
 
     .right-pane
         .ui-x-pin
