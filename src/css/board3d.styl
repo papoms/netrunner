@@ -1,0 +1,81 @@
+// Experimental three.js game board (nr.gameboard.board3d)
+
+.gameboard .centralpane
+    .board3d
+        position: relative
+        flex: 1
+        min-height: 300px
+        width: 100%
+        height: 100%
+        overflow: hidden
+
+        .board3d-canvas
+            position: absolute
+            top: 0
+            left: 0
+            right: 0
+            bottom: 0
+            overflow: hidden
+
+            canvas
+                display: block
+                width: 100%
+                height: 100%
+                cursor: pointer
+
+        .board3d-reset-view
+            position: absolute
+            z-index: 20
+            width: 32px
+            height: 32px
+            padding: 0
+            font-size: 18px
+            line-height: 30px
+            color: #e8e8e8
+            background: rgba(0, 0, 0, 0.45)
+            border: 1px solid rgba(255, 255, 255, 0.25)
+            border-radius: 50%
+            cursor: pointer
+
+            &:hover
+                background: rgba(0, 0, 0, 0.7)
+
+        // zero-size anchor at the click position; the 2D ability menus
+        // position themselves above their parent (bottom: 100%)
+        .board3d-menu
+            position: absolute
+            width: 0
+            height: 0
+            z-index: 30
+
+    .board3d-message
+        margin: 2rem auto
+        padding: 1rem
+        max-width: 30rem
+        color: white
+        background: rgba(0, 0, 0, 0.6)
+        border-radius: 4px
+        text-align: center
+
+// Setting :board-3d-full-width: the 3D board spans the whole game board and the
+// side panels float above it. The (now empty) central pane keeps its place in
+// the layout: nr.gameboard.board3d centres the cards on it, so they stay in the
+// unobstructed area.
+.gameboard.board3d-full
+    position: relative
+
+    .centralpane
+        position: static
+
+        .board3d
+            position: absolute
+            top: 0
+            left: 0
+            right: 0
+            bottom: 0
+            z-index: 0
+
+    .leftpane, .right-pane
+        position: relative
+        z-index: 1
+        background: rgba(8, 10, 14, 0.55)

@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+"""Evaluate one Clojure expression in the running dev server (nREPL on
+localhost:44867, see docker-compose.yml) and print its output and value.
+
+Much faster than `lein repl :connect` for one-off calls.
+
+    bin/dev-repl '(+ 1 2)'
+    bin/dev-repl "(require 'web.dev-game :reload)"
+"""
+import socket
+import sys
+
+HOST, PORT = "localhost", 44867
+
+
+def encode(x):
+    if isinstance(x, int):
+        return b"i%de" % x
+    if isinstance(x, str):
+        x = x.encode()
+    if isinstance(x, bytes):
+        return b"%d:%s" % (len(x), x)
+    if isinstance(x, list):
+        return b"l" + b"".join(encode(i) for i in x) + b"e"
+    if isinstance(x, dict):
+        return b"d" + b"".join(encode(k) + encode(v) for k, v in sorted(x.items())) + b"e"
+    raise TypeError(x)
+
+
+class Reader:
+    """Incremental bencode reader on a socket."""
+
+    def __init__(self, sock):
+        self.sock, self.buf = sock, b""
+
+    def fill(self, n):
+        while len(self.buf) < n:
+            chunk = self.sock.recv(65536)
+            if not chunk:
+                raise EOFError("nREPL connection closed")
+            self.buf += chunk
+
+    def peek(self):
+        self.fill(1)
+        return self.buf[:1]
+
+    def take(self, n):
+        self.fill(n)
+        out, self.buf = self.buf[:n], self.buf[n:]
+        return out
+
+    def until(self, stop):
+        out = b""
+        while (c := self.take(1)) != stop:
+            out += c
+        return out
+
+    def read(self):
+        c = self.take(1)
+        if c == b"i":
+            return int(self.until(b"e"))
+        if c in (b"l", b"d"):
+            items = []
+            while self.peek() != b"e":
+                items.append(self.read())
+            self.take(1)
+            return items if c == b"l" else dict(zip(items[::2], items[1::2]))
+        length = int(c + self.until(b":"))
+        return self.take(length).decode(errors="replace")
+
+
+def evaluate(code, show_value=True):
+    with socket.create_connection((HOST, PORT)) as sock:
+        sock.sendall(encode({"op": "eval", "code": code, "id": "1"}))
+        reader, failed = Reader(sock), False
+        while True:
+            msg = reader.read()
+            if "out" in msg:
+                sys.stdout.write(msg["out"])
+            if "err" in msg:
+                sys.stderr.write(msg["err"])
+            if "ex" in msg:
+                failed = True
+            if "value" in msg and show_value and msg["value"] != "nil":
+                print(msg["value"])
+            if "done" in msg.get("status", []):
+                return not failed
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        print(__doc__)
+        sys.exit(2)
+    try:
+        ok = evaluate(sys.argv[1])
+    except ConnectionRefusedError:
+        sys.exit("dev server not reachable on localhost:44867 (is the docker stack up? bin/up)")
+    sys.exit(0 if ok else 1)

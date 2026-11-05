@@ -194,6 +194,11 @@
     :sync? true
     :validate-fn #(contains? valid-card-zoom-options %)
     :doc "How to display zoomed cards (image/text)"}
+   {:key :card-zoom-holo
+    :default false
+    :sync? false  ; device-specific: visual effect
+    :validate-fn boolean?
+    :doc "Tilt and holo shine on the zoomed card, following the pointer on the hovered card"}
    {:key :card-unplayable-fade-out
     :default true
     :sync? false  ; device-specific
@@ -204,6 +209,26 @@
     :sync? false  ; device-specific
     :validate-fn boolean?
     :doc "Whether cards in hand should be responsive to mouse movement"}
+   {:key :board-3d
+    :default false
+    :sync? false  ; device-specific: depends on the device's WebGL support
+    :validate-fn boolean?
+    :doc "Experimental: render the game board with three.js"}
+   {:key :board-3d-full-width
+    :default false
+    :sync? false  ; device-specific, like :board-3d
+    :validate-fn boolean?
+    :doc "The 3D board spans the whole width; the side panels float above it"}
+   {:key :ui-experiments
+    :default false
+    :sync? false  ; device-specific: layout tweaks depend on the screen
+    :validate-fn boolean?
+    :doc "Experimental interface tweaks for the game board (see nr.gameboard.layout-experiments)"}
+   {:key :board-3d-playmat
+    :default ""
+    :sync? false  ; device-specific, like :board-3d
+    :validate-fn string?
+    :doc "Image URL of a playmat for the 3D board (Corp half on the left, Runner half on the right); empty for the plain table"}
    {:key :corp-card-sleeve
     :default "nsg-card-back"
     :sync? true

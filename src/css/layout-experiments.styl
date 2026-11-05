@@ -1,0 +1,91 @@
+// Experimental interface tweaks (setting :ui-experiments), see
+// nr.gameboard.layout-experiments. Everything is scoped to .gameboard.ui-x, so
+// with the setting off nothing here applies.
+
+ui-x-edge = 14px          // how much of a hidden panel stays visible at the screen edge
+ui-x-speed = 0.25s
+
+.gameboard.ui-x
+    position: relative
+
+    // Right panel (card zoom, log, chat): out of the layout, parked at the
+    // right edge with a thin strip showing; it slides in while hovered.
+    &:not(.ui-x-right-pinned) .right-pane
+        position: absolute
+        top: 0
+        right: 0
+        bottom: 0
+        z-index: 40
+        // 14px = ui-x-edge (Stylus doesn't substitute variables inside calc())
+        transform: translateX(calc(100% - 14px))
+        // leaving: wait a moment, so a brief slip of the pointer doesn't close it
+        transition: transform ui-x-speed ease 0.35s
+
+        // the strip at the edge: a grip to aim for
+        &::before
+            content: ""
+            position: absolute
+            top: 50%
+            left: 4px
+            width: 4px
+            height: 64px
+            margin-top: -32px
+            border-radius: 2px
+            background: rgba(255, 255, 255, 0.35)
+            transition: opacity ui-x-speed ease
+
+        &:hover
+            transform: translateX(0)
+            transition: transform ui-x-speed ease 0s
+
+            &::before
+                opacity: 0
+
+        .content-pane
+            background: rgba(8, 10, 14, 0.88)
+            box-shadow: -6px 0 18px rgba(0, 0, 0, 0.5)
+
+    // the card preview floats freely: only the log/chat below it gets a
+    // background (also overrides the full-width 3D board's panel background)
+    // the left panel too: no strip behind its boxes (the full-width 3D board
+    // gives both side panels a translucent background)
+    .leftpane
+        background: transparent
+
+    .right-pane
+        background: transparent
+
+        // the zoomed card's frame (.card-preview.blue-shade) has its own tinted
+        // background around the card: let the card stand on its own
+        .card-zoom .card-preview
+            background: transparent
+            border-color: transparent
+            box-shadow: none
+
+        .content-pane
+            background: rgba(8, 10, 14, 0.55)
+
+    .right-pane
+        .ui-x-pin
+            position: absolute
+            top: 4px
+            left: 4px
+            z-index: 50
+            width: 26px
+            height: 26px
+            padding: 0
+            font-size: 13px
+            line-height: 24px
+            background: rgba(0, 0, 0, 0.45)
+            border: 1px solid rgba(255, 255, 255, 0.2)
+            border-radius: 50%
+            cursor: pointer
+            opacity: 0.55
+            filter: grayscale(1)
+
+            &:hover
+                opacity: 1
+
+            &.pinned
+                opacity: 1
+                filter: none

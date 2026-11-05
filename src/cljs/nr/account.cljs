@@ -814,6 +814,40 @@
           [api-keys s]
 
           [:section
+           [tr-element :h3 [:settings_experimental-3d "Experimental 3D version"]]
+           [:div
+            [:label [:input {:type "checkbox"
+                             :value true
+                             :checked (:board-3d @s)
+                             :on-change #(swap! s assoc :board-3d (.. % -target -checked))}]
+             [tr-span [:settings_board-3d "3D game board (three.js, experimental)"]]]]
+           [:div
+            [:label [:input {:type "checkbox"
+                             :value true
+                             :checked (:board-3d-full-width @s)
+                             :on-change #(swap! s assoc :board-3d-full-width (.. % -target -checked))}]
+             [tr-span [:settings_board-3d-full-width "3D board fills the whole width (side panels float above it)"]]]]
+           [:div
+            [:label [:input {:type "checkbox"
+                             :name "card-zoom-holo"
+                             :checked (:card-zoom-holo @s)
+                             :on-change #(swap! s assoc :card-zoom-holo (.. % -target -checked))}]
+             [tr-span [:settings_card-zoom-holo "Holo effect on zoomed cards (tilts and shines as you move over a card)"]]]]
+           [:div
+            [:label [:input {:type "checkbox"
+                             :name "ui-experiments"
+                             :checked (:ui-experiments @s)
+                             :on-change #(swap! s assoc :ui-experiments (.. % -target -checked))}]
+             [tr-span [:settings_ui-experiments "Experimental interface (e.g. the right panel slides in from the screen edge)"]]]]
+           [:br]
+           [:div
+            [tr-span [:settings_board-3d-playmat "Playmat image for the 3D board (URL, Corp half on the left, Runner half on the right; empty for the plain table)"]]
+            [:div [:input {:type "text"
+                           :placeholder "/img/playmats/..."
+                           :on-change #(swap! s assoc :board-3d-playmat (.. % -target -value))
+                           :value (or (:board-3d-playmat @s) "")}]]]]
+
+          [:section
            [:span.flash-message (:flash-message @s)]]]])})))
 
 (defn account []
@@ -822,9 +856,9 @@
         state (r/atom
                (-> (:options @app-state)
                    (select-keys [:pronouns :bespoke-sounds :language :card-language :sounds :default-format
-                                 :card-unplayable-fade-out :card-hover-movement
+                                 :card-unplayable-fade-out :card-hover-movement :board-3d :board-3d-playmat :board-3d-full-width :ui-experiments
                                  :lobby-sounds :sounds-volume :background :custom-bg-url :card-zoom
-                                 :pin-zoom :show-alt-art :card-resolution :pass-on-rez
+                                 :pin-zoom :card-zoom-holo :show-alt-art :card-resolution :pass-on-rez
                                  :auto-select-default-deck-casual :auto-select-default-deck-tournament
                                  :default-game-description :default-save-replay
                                  :default-password :default-password-protect-casual

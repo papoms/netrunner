@@ -3,8 +3,15 @@
  :builds
  {:app {:target :browser
         :output-dir "resources/public/js"
+        :module-loader true
         :devtools {:watch-dir "resources/public/css"
                    :watch-path "/css"
                    :repl-init-ns dev.nr}
-        :dev {:modules {:main {:entries [dev.nr]}}}
-        :release {:modules {:main {:entries [prod.nr]}}}}}}
+        ;; :board3d is the experimental three.js board renderer. It is loaded
+        ;; lazily (shadow.lazy) only when the user enables it in the settings.
+        :dev {:modules {:main {:entries [dev.nr]}
+                        :board3d {:entries [nr.gameboard.board3d]
+                                  :depends-on #{:main}}}}
+        :release {:modules {:main {:entries [prod.nr]}
+                            :board3d {:entries [nr.gameboard.board3d]
+                                      :depends-on #{:main}}}}}}}
