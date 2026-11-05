@@ -4,6 +4,14 @@ Hosted at [http://www.jinteki.net](http://www.jinteki.net). [Example of gameplay
 
 ![screenshot](http://i.imgur.com/xkxOMHc.jpg)
 
+## Experimental 3D client (this fork)
+
+This branch adds an optional three.js game board and other interface
+experiments, and can be used on jinteki.net itself: build it, serve it locally
+and redirect jinteki.net's client files to it with a browser extension. See
+[Playing on jinteki.net with this client](DEVELOPMENT.md#playing-on-jintekinet-with-this-client-3d-board)
+in DEVELOPMENT.md, including its known limitations (e.g. no custom card backs).
+
 ## Card implementation status
 
 [Card rules implementation status](https://docs.google.com/spreadsheets/d/1ICv19cNjSaW9C-DoEEGH3iFt09PBTob4CAutGex0gnE/pubhtml)

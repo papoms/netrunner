@@ -17,6 +17,12 @@ stays the server; only the client code comes from your machine.
    Profile. For a playmat use a full URL such as
    `http://localhost:8000/img/playmats/<file>.jpg`.
 
+Known limitation: the build prints `0 card backs loaded`. The list of card
+backs (sleeves) is compiled in from `data/card-backs.edn`, which jinteki
+fetches from a private source and which isn't available locally. So this
+client shows the standard NSG back instead of players' chosen sleeves, and the
+sleeve choice in the settings may be empty. Gameplay is unaffected.
+
 Switch the Requestly rule off to get the regular client back. When jinteki.net
 moves to a new version (check the `?v=` on main.js), the port has to be redone
 on that tag. Don't report bugs seen with this client to the jinteki team.
